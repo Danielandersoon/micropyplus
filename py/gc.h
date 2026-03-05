@@ -58,6 +58,23 @@ void gc_collect_end(void);
 // Use this function to sweep the whole heap and run all finalisers
 void gc_sweep_all(void);
 
+// Reference Map / Hash Table for tracking object moves or smart pointers
+typedef struct _gc_ref_entry_t {
+    void *key;
+    void *value;
+} gc_ref_entry_t;
+
+typedef struct _gc_ref_map_t {
+    gc_ref_entry_t *entries;
+    size_t size;
+    size_t count;
+} gc_ref_map_t;
+
+void gc_ref_map_init(gc_ref_map_t *map, size_t size);
+void gc_ref_map_insert(gc_ref_map_t *map, void *old_ptr, void *new_ptr);
+void *gc_ref_map_lookup(gc_ref_map_t *map, void *old_ptr);
+void gc_ref_map_deinit(gc_ref_map_t *map);
+
 enum {
     GC_ALLOC_FLAG_HAS_FINALISER = 1,
 };
@@ -83,5 +100,22 @@ typedef struct _gc_info_t {
 void gc_info(gc_info_t *info);
 void gc_dump_info(const mp_print_t *print);
 void gc_dump_alloc_table(const mp_print_t *print);
+
+typedef struct {
+    void* obj;
+    uint16_t block_start;
+    uint16_t block_count;
+    uint8_t flags;          
+} pinned_entry_t;
+
+#define MAX_PINNED_OBJECTS 32  // Configurable
+
+static pinned_entry_t pinned_obj_table[MAX_PINNED_OBJECTS];
+static uint8_t pinned_count;
+
+void gc_pin(void* ptr);
+void gc_unpin(void* ptr);
+bool gc_is_pinned(void* ptr);
+bool gc_is_block_pinned(size_t block);
 
 #endif // MICROPY_INCLUDED_PY_GC_H

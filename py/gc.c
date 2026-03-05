@@ -1312,4 +1312,125 @@ void gc_dump_alloc_table(const mp_print_t *print) {
     GC_EXIT();
 }
 
+// Pin an object to prevent garbage collection
+void gc_pin(void* ptr) {
+    if (ptr == NULL) {
+        return;
+    }
+
+    GC_ENTER();
+
+    // Get the area and block for this pointer
+    mp_state_mem_area_t *area;
+    #if MICROPY_GC_SPLIT_HEAP
+    area = gc_get_ptr_area(ptr);
+    if (!area) {
+        GC_EXIT();
+        return;
+    }
+    #else
+    if (!VERIFY_PTR(ptr)) {
+        GC_EXIT();
+        return;
+    }
+    area = &MP_STATE_MEM(area);
+    #endif
+
+    size_t block = BLOCK_FROM_PTR(area, ptr);
+
+    // Check if already pinned
+    for (size_t i = 0; i < pinned_count; i++) {
+        if (pinned_obj_table[i].obj == ptr) {
+            GC_EXIT();
+            return;  // Already pinned
+        }
+    }
+
+    // If table is full, don't pin
+    if (pinned_count >= MAX_PINNED_OBJECTS) {
+        GC_EXIT();
+        return;
+    }
+
+    // Count the number of consecutive blocks for this object
+    uint16_t block_count = 0;
+    for (size_t bl = block; bl < area->gc_alloc_table_byte_len * BLOCKS_PER_ATB; bl++) {
+        block_count++;
+        if (ATB_GET_KIND(area, bl) != AT_TAIL) {
+            break;
+        }
+    }
+
+    // Add to pinned table
+    pinned_obj_table[pinned_count].obj = ptr;
+    pinned_obj_table[pinned_count].block_start = (uint16_t)block;
+    pinned_obj_table[pinned_count].block_count = block_count;
+    pinned_obj_table[pinned_count].flags = 0;
+    pinned_count++;
+
+    GC_EXIT();
+}
+
+// Unpin an object to allow garbage collection
+void gc_unpin(void* ptr) {
+    if (ptr == NULL) {
+        return;
+    }
+
+    GC_ENTER();
+
+    // Find and remove from pinned table
+    for (size_t i = 0; i < pinned_count; i++) {
+        if (pinned_obj_table[i].obj == ptr) {
+            // Remove by shifting remaining entries
+            if (i < pinned_count - 1) {
+                memmove(&pinned_obj_table[i], &pinned_obj_table[i + 1],
+                        (pinned_count - i - 1) * sizeof(pinned_entry_t));
+            }
+            pinned_count--;
+            GC_EXIT();
+            return;
+        }
+    }
+
+    GC_EXIT();
+}
+
+// Check if a pointer is pinned
+bool gc_is_pinned(void* ptr) {
+    if (ptr == NULL) {
+        return false;
+    }
+
+    GC_ENTER();
+
+    for (size_t i = 0; i < pinned_count; i++) {
+        if (pinned_obj_table[i].obj == ptr) {
+            GC_EXIT();
+            return true;
+        }
+    }
+
+    GC_EXIT();
+    return false;
+}
+
+// Check if a specific block is pinned
+bool gc_is_block_pinned(size_t block) {
+    GC_ENTER();
+
+    for (size_t i = 0; i < pinned_count; i++) {
+        size_t block_start = pinned_obj_table[i].block_start;
+        size_t block_end = block_start + pinned_obj_table[i].block_count - 1;
+        
+        if (block >= block_start && block <= block_end) {
+            GC_EXIT();
+            return true;
+        }
+    }
+
+    GC_EXIT();
+    return false;
+}
+
 #endif // MICROPY_ENABLE_GC
