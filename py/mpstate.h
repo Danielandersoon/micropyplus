@@ -112,6 +112,11 @@ typedef struct _mp_state_mem_area_t {
 
     size_t gc_last_free_atb_index;
     size_t gc_last_used_block; // The block ID of the highest block allocated in the area
+
+    // Bi-directional allocator fields
+    size_t gc_last_used_block_from_left;   // Tracks left frontier
+    size_t gc_last_used_block_from_right;  // Tracks right frontier
+    size_t gc_num_blocks;                   // Total blocks in area
 } mp_state_mem_area_t;
 
 // This structure hold information about the memory allocation system.

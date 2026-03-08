@@ -77,6 +77,7 @@ void gc_ref_map_deinit(gc_ref_map_t *map);
 
 enum {
     GC_ALLOC_FLAG_HAS_FINALISER = 1,
+    GC_ALLOC_FLAG_IS_PINNED = 2,
 };
 
 void *gc_alloc(size_t n_bytes, unsigned int alloc_flags);
@@ -107,8 +108,6 @@ typedef struct {
     uint16_t block_count;
     uint8_t flags;          
 } pinned_entry_t;
-
-#define MAX_PINNED_OBJECTS 32  // Configurable
 
 static pinned_entry_t pinned_obj_table[MAX_PINNED_OBJECTS];
 static uint8_t pinned_count;

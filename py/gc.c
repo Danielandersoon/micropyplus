@@ -181,6 +181,11 @@ static void gc_setup_area(mp_state_mem_area_t *area, void *start, void *end) {
     area->gc_last_free_atb_index = 0;
     area->gc_last_used_block = 0;
 
+    size_t gc_pool_block_len = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
+    area->gc_last_used_block_from_left = (size_t)-1;
+    area->gc_last_used_block_from_right = gc_pool_block_len;
+    area->gc_num_blocks = gc_pool_block_len;
+
     #if MICROPY_GC_SPLIT_HEAP
     area->next = NULL;
     #endif
@@ -757,10 +762,56 @@ void gc_info(gc_info_t *info) {
     GC_EXIT();
 }
 
+// Allocate from the right side of heap for pinned objects
+// Returns block index where allocation starts, or (size_t)
+static size_t gc_alloc_right(mp_state_mem_area_t *area, size_t n_blocks) {
+    // Check for collision before attempting allocation
+    if (area->gc_last_used_block_from_left == (size_t)-1) {
+        // Left side free, safe to allocate
+    } else if (area->gc_last_used_block_from_left + n_blocks >= area->gc_last_used_block_from_right) {
+        // Collision detected
+        return (size_t)-1;
+    }
+
+    // Scan from right frontier looking for n_blocks FREE blocks
+    size_t n_free = 0;
+    size_t alloc_start = (size_t)-1;
+
+    for (size_t block = area->gc_last_used_block_from_right - 1; block > area->gc_last_used_block_from_left; block--) {
+        if (ATB_GET_KIND(area, block) == AT_FREE) {
+            n_free++;
+            if (n_free == n_blocks) {
+                alloc_start = block;
+                break;
+            }
+        } else {
+            n_free = 0;  // Reset counter when allocated block hit
+        }
+    }
+
+    if (alloc_start == (size_t)-1) {
+        // No consecutive free blocks
+        return (size_t)-1;
+    }
+
+    // Mark allocated blocks
+    size_t alloc_end = alloc_start + n_blocks - 1;
+    ATB_FREE_TO_HEAD(area, alloc_start);
+    for (size_t i = alloc_start + 1; i <= alloc_end; i++) {
+        ATB_FREE_TO_TAIL(area, i);
+    }
+
+    // Update right frontier
+    area->gc_last_used_block_from_right = alloc_start;
+
+    return alloc_start;
+}
+
 void *gc_alloc(size_t n_bytes, unsigned int alloc_flags) {
     bool has_finaliser = alloc_flags & GC_ALLOC_FLAG_HAS_FINALISER;
+    bool is_pinned = alloc_flags & GC_ALLOC_FLAG_IS_PINNED;
     size_t n_blocks = ((n_bytes + BYTES_PER_BLOCK - 1) & (~(BYTES_PER_BLOCK - 1))) / BYTES_PER_BLOCK;
-    DEBUG_printf("gc_alloc(" UINT_FMT " bytes -> " UINT_FMT " blocks)\n", n_bytes, n_blocks);
+    DEBUG_printf("gc_alloc(" UINT_FMT " bytes -> " UINT_FMT " blocks, pinned=%d)\n", n_bytes, n_blocks, is_pinned);
 
     // check for 0 allocation
     if (n_blocks == 0) {
@@ -773,6 +824,65 @@ void *gc_alloc(size_t n_bytes, unsigned int alloc_flags) {
     }
 
     GC_ENTER();
+
+    // Handle pinned object allocation from right
+    if (is_pinned) {
+        mp_state_mem_area_t *area;
+        int collected = !MP_STATE_MEM(gc_auto_collect_enabled);
+
+        for (;;) {
+            #if MICROPY_GC_SPLIT_HEAP
+            area = MP_STATE_MEM(gc_last_free_area);
+            if (!area) area = &MP_STATE_MEM(area);
+            #else
+            area = &MP_STATE_MEM(area);
+            #endif
+
+            size_t block = gc_alloc_right(area, n_blocks);
+            if (block != (size_t)-1) {
+                // Successfully allocated from right
+                size_t end_block = block + n_blocks - 1;
+                area->gc_last_used_block = MAX(area->gc_last_used_block, end_block);
+                
+                void *ret_ptr = (void *)(area->gc_pool_start + block * BYTES_PER_BLOCK);
+                DEBUG_printf("gc_alloc(pinned, %p)\n", ret_ptr);
+
+                #if MICROPY_GC_ALLOC_THRESHOLD
+                MP_STATE_MEM(gc_alloc_amount) += n_blocks;
+                #endif
+
+                GC_EXIT();
+
+                // Clear memory
+                #if MICROPY_GC_CONSERVATIVE_CLEAR
+                memset((byte *)ret_ptr, 0, n_blocks * BYTES_PER_BLOCK);
+                #else
+                memset((byte *)ret_ptr + n_bytes, 0, n_blocks * BYTES_PER_BLOCK - n_bytes);
+                #endif
+
+                #if MICROPY_ENABLE_FINALISER
+                if (has_finaliser) {
+                    ((mp_obj_base_t *)ret_ptr)->type = NULL;
+                    GC_ENTER();
+                    FTB_SET(area, block);
+                    GC_EXIT();
+                }
+                #endif
+
+                return ret_ptr;
+            }
+
+            // Allocation failed, run GC
+            GC_EXIT();
+            if (collected) {
+                return NULL;
+            }
+            DEBUG_printf("gc_alloc(pinned): no free mem, triggering GC\n");
+            gc_collect();
+            collected = 1;
+            GC_ENTER();
+        }
+    }
 
     mp_state_mem_area_t *area;
     size_t i;
@@ -861,6 +971,13 @@ found:
     }
 
     area->gc_last_used_block = MAX(area->gc_last_used_block, end_block);
+
+    // Track left frontier
+    if (area->gc_last_used_block_from_left == (size_t)-1) {
+        area->gc_last_used_block_from_left = start_block;
+    } else {
+        area->gc_last_used_block_from_left = MAX(area->gc_last_used_block_from_left, end_block);
+    }
 
     // mark first block as used head
     ATB_FREE_TO_HEAD(area, start_block);
@@ -973,6 +1090,26 @@ void gc_free(void *ptr) {
     // set the last_free pointer to this block if it's earlier in the heap
     if (block / BLOCKS_PER_ATB < area->gc_last_free_atb_index) {
         area->gc_last_free_atb_index = block / BLOCKS_PER_ATB;
+    }
+
+    // Count consecutive blocks for this object to check if we're freeing from frontier
+    size_t block_start = block;
+    size_t block_count = 1;
+    size_t temp_block = block + 1;
+    while (ATB_GET_KIND(area, temp_block) == AT_TAIL) {
+        block_count++;
+        temp_block++;
+    }
+
+    // Update left frontier if freeing at left edge
+    if (block_start <= area->gc_last_used_block_from_left && 
+        block_start + block_count - 1 == area->gc_last_used_block_from_left) {
+        area->gc_last_used_block_from_left = block_start - 1;
+    }
+
+    // Update right frontier if freeing at right edge
+    if (block_start == area->gc_last_used_block_from_right) {
+        area->gc_last_used_block_from_right = block_start + block_count;
     }
 
     // free head and all of its tail blocks
@@ -1344,12 +1481,6 @@ void gc_pin(void* ptr) {
             GC_EXIT();
             return;  // Already pinned
         }
-    }
-
-    // If table is full, don't pin
-    if (pinned_count >= MAX_PINNED_OBJECTS) {
-        GC_EXIT();
-        return;
     }
 
     // Count the number of consecutive blocks for this object
