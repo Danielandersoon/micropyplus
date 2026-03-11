@@ -104,13 +104,15 @@ void gc_dump_alloc_table(const mp_print_t *print);
 
 typedef struct {
     void* obj;
-    uint16_t block_start;
-    uint16_t block_count;
-    uint8_t flags;          
-} pinned_entry_t;
+    size_t block_start;
+    size_t block_count;
+} pinned_range_t;
 
-static pinned_entry_t pinned_obj_table[MAX_PINNED_OBJECTS];
-static uint8_t pinned_count;
+typedef struct {
+    pinned_range_t *ranges;
+    size_t count;
+    size_t capacity;
+} pinned_table_t;
 
 void gc_pin(void* ptr);
 void gc_unpin(void* ptr);

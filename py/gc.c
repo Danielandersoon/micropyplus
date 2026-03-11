@@ -135,6 +135,33 @@ static void gc_deal_with_stack_overflow(void);
 static void gc_sweep_run_finalisers(void);
 static void gc_sweep_free_blocks(void);
 
+// Pinned objects tracking
+static pinned_table_t gc_pinned_table = {NULL, 0, 0};
+
+// Initial capacity for pinned table (will grow dynamically)
+#define PINNED_TABLE_INITIAL_CAPACITY (8)
+
+// Helper function to find pinned range by block (binary search would be optimal for larger tables)
+static ssize_t gc_pinned_find_range_by_block(size_t block) {
+    for (ssize_t i = 0; i < (ssize_t)gc_pinned_table.count; i++) {
+        pinned_range_t *range = &gc_pinned_table.ranges[i];
+        if (block >= range->block_start && block < range->block_start + range->block_count) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// Helper function to find range by pointer
+static ssize_t gc_pinned_find_range_by_ptr(const void *ptr) {
+    for (ssize_t i = 0; i < (ssize_t)gc_pinned_table.count; i++) {
+        if (gc_pinned_table.ranges[i].obj == ptr) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 // TODO waste less memory; currently requires that all entries in alloc_table have a corresponding block in pool
 static void gc_setup_area(mp_state_mem_area_t *area, void *start, void *end) {
     // calculate parameters for GC (T=total, A=alloc table, F=finaliser table, P=pool; all in bytes):
@@ -229,6 +256,11 @@ void gc_init(void *start, void *end) {
     MP_STATE_MEM(gc_alloc_threshold) = (size_t)-1;
     MP_STATE_MEM(gc_alloc_amount) = 0;
     #endif
+
+    // Initialize pinned table
+    gc_pinned_table.ranges = NULL;
+    gc_pinned_table.count = 0;
+    gc_pinned_table.capacity = 0;
 
     GC_MUTEX_INIT();
 }
@@ -632,6 +664,12 @@ static void gc_sweep_free_blocks(void) {
             MICROPY_GC_HOOK_LOOP(block);
             switch (ATB_GET_KIND(area, block)) {
                 case AT_HEAD:
+                    // Check if this block is pinned - don't free pinned objects
+                    if (gc_is_block_pinned(block)) {
+                        free_tail = 0;
+                        last_used_block = block;
+                        break;
+                    }
                     free_tail = 1;
                     DEBUG_printf("gc_sweep_free_blocks(%p)\n", (void *)PTR_FROM_BLOCK(area, block));
                     #if MICROPY_PY_GC_COLLECT_RETVAL
@@ -1068,6 +1106,12 @@ void gc_free(void *ptr) {
     assert(ATB_GET_KIND(area, block) == AT_HEAD
         || (ATB_GET_KIND(area, block) == AT_MARK && (MP_STATE_THREAD(gc_lock_depth) & GC_COLLECT_FLAG)));
 
+    // Check if this object is pinned - cannot free pinned objects
+    if (gc_is_block_pinned(block)) {
+        GC_EXIT();
+        return;
+    }
+
     #if MICROPY_ENABLE_FINALISER
     FTB_CLEAR(area, block);
     #endif
@@ -1476,28 +1520,62 @@ void gc_pin(void* ptr) {
     size_t block = BLOCK_FROM_PTR(area, ptr);
 
     // Check if already pinned
-    for (size_t i = 0; i < pinned_count; i++) {
-        if (pinned_obj_table[i].obj == ptr) {
-            GC_EXIT();
-            return;  // Already pinned
-        }
+    if (gc_pinned_find_range_by_ptr(ptr) != -1) {
+        GC_EXIT();
+        return;  // Already pinned
     }
 
     // Count the number of consecutive blocks for this object
-    uint16_t block_count = 0;
-    for (size_t bl = block; bl < area->gc_alloc_table_byte_len * BLOCKS_PER_ATB; bl++) {
-        block_count++;
-        if (ATB_GET_KIND(area, bl) != AT_TAIL) {
+    size_t block_count = 1;  // HEAD block
+    for (size_t bl = block + 1; bl < area->gc_alloc_table_byte_len * BLOCKS_PER_ATB; bl++) {
+        if (ATB_GET_KIND(area, bl) == AT_TAIL) {
+            block_count++;
+        } else {
             break;
         }
     }
 
-    // Add to pinned table
-    pinned_obj_table[pinned_count].obj = ptr;
-    pinned_obj_table[pinned_count].block_start = (uint16_t)block;
-    pinned_obj_table[pinned_count].block_count = block_count;
-    pinned_obj_table[pinned_count].flags = 0;
-    pinned_count++;
+    // Expand pinned table if needed
+    if (gc_pinned_table.count >= gc_pinned_table.capacity) {
+        size_t new_capacity = gc_pinned_table.capacity == 0 ? 
+                               PINNED_TABLE_INITIAL_CAPACITY : 
+                               gc_pinned_table.capacity * 2;
+        
+        pinned_range_t *new_ranges = (pinned_range_t *)m_realloc(gc_pinned_table.ranges, 
+                                                                  gc_pinned_table.capacity * sizeof(pinned_range_t),
+                                                                  new_capacity * sizeof(pinned_range_t));
+        if (new_ranges == NULL) {
+            GC_EXIT();
+            return;  // Allocation failed
+        }
+        
+        gc_pinned_table.ranges = new_ranges;
+        gc_pinned_table.capacity = new_capacity;
+    }
+
+    // Insert in sorted order by block_start (insertion sort)
+    size_t insert_pos = gc_pinned_table.count;
+    for (size_t i = 0; i < gc_pinned_table.count; i++) {
+        if (block < gc_pinned_table.ranges[i].block_start) {
+            insert_pos = i;
+            break;
+        }
+    }
+
+    // Shift entries to make room
+    if (insert_pos < gc_pinned_table.count) {
+        memmove(&gc_pinned_table.ranges[insert_pos + 1],
+                &gc_pinned_table.ranges[insert_pos],
+                (gc_pinned_table.count - insert_pos) * sizeof(pinned_range_t));
+    }
+
+    // Add the new pinned range
+    gc_pinned_table.ranges[insert_pos].obj = ptr;
+    gc_pinned_table.ranges[insert_pos].block_start = block;
+    gc_pinned_table.ranges[insert_pos].block_count = block_count;
+    gc_pinned_table.count++;
+
+    DEBUG_printf("gc_pin(%p) at block %zu (count=%zu)\n", ptr, block, gc_pinned_table.count);
 
     GC_EXIT();
 }
@@ -1510,18 +1588,17 @@ void gc_unpin(void* ptr) {
 
     GC_ENTER();
 
-    // Find and remove from pinned table
-    for (size_t i = 0; i < pinned_count; i++) {
-        if (pinned_obj_table[i].obj == ptr) {
-            // Remove by shifting remaining entries
-            if (i < pinned_count - 1) {
-                memmove(&pinned_obj_table[i], &pinned_obj_table[i + 1],
-                        (pinned_count - i - 1) * sizeof(pinned_entry_t));
-            }
-            pinned_count--;
-            GC_EXIT();
-            return;
+    ssize_t idx = gc_pinned_find_range_by_ptr(ptr);
+    if (idx != -1) {
+        // Remove by shifting remaining entries
+        if ((size_t)idx < gc_pinned_table.count - 1) {
+            memmove(&gc_pinned_table.ranges[idx],
+                    &gc_pinned_table.ranges[idx + 1],
+                    (gc_pinned_table.count - idx - 1) * sizeof(pinned_range_t));
         }
+        gc_pinned_table.count--;
+
+        DEBUG_printf("gc_unpin(%p) count=%zu\n", ptr, gc_pinned_table.count);
     }
 
     GC_EXIT();
@@ -1535,33 +1612,60 @@ bool gc_is_pinned(void* ptr) {
 
     GC_ENTER();
 
-    for (size_t i = 0; i < pinned_count; i++) {
-        if (pinned_obj_table[i].obj == ptr) {
-            GC_EXIT();
-            return true;
-        }
-    }
+    bool result = (gc_pinned_find_range_by_ptr(ptr) != -1);
 
     GC_EXIT();
-    return false;
+    return result;
 }
 
 // Check if a specific block is pinned
 bool gc_is_block_pinned(size_t block) {
     GC_ENTER();
 
-    for (size_t i = 0; i < pinned_count; i++) {
-        size_t block_start = pinned_obj_table[i].block_start;
-        size_t block_end = block_start + pinned_obj_table[i].block_count - 1;
-        
-        if (block >= block_start && block <= block_end) {
-            GC_EXIT();
-            return true;
-        }
-    }
+    bool result = (gc_pinned_find_range_by_block(block) != -1);
 
     GC_EXIT();
-    return false;
+    return result;
+}
+
+// Validate pinned table entries after GC - remove entries for freed objects
+static void gc_pinned_validate(void) {
+    for (ssize_t i = (ssize_t)gc_pinned_table.count - 1; i >= 0; i--) {
+        pinned_range_t *range = &gc_pinned_table.ranges[i];
+        
+        // Find which area this range belongs to
+        mp_state_mem_area_t *area = NULL;
+        #if MICROPY_GC_SPLIT_HEAP
+        area = gc_get_ptr_area(range->obj);
+        if (!area) {
+            // Object is no longer in heap, remove from pinned table
+            goto remove_entry;
+        }
+        #else
+        if (!VERIFY_PTR(range->obj)) {
+            // Invalid pointer, remove from pinned table
+            goto remove_entry;
+        }
+        area = &MP_STATE_MEM(area);
+        #endif
+        
+        // Verify the block is still marked as allocated
+        if (ATB_GET_KIND(area, range->block_start) != AT_HEAD) {
+            // Block is no longer allocated, remove from pinned table
+            goto remove_entry;
+        }
+        
+        continue;
+        
+remove_entry:
+        // Remove this entry by shifting
+        if ((size_t)i < gc_pinned_table.count - 1) {
+            memmove(&gc_pinned_table.ranges[i],
+                    &gc_pinned_table.ranges[i + 1],
+                    (gc_pinned_table.count - i - 1) * sizeof(pinned_range_t));
+        }
+        gc_pinned_table.count--;
+    }
 }
 
 #endif // MICROPY_ENABLE_GC
