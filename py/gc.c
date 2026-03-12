@@ -603,12 +603,20 @@ void gc_collect_end(void) {
     gc_sweep_run_finalisers();
     gc_sweep_free_blocks();
     #if MICROPY_GC_SPLIT_HEAP
-    MP_STATE_MEM(gc_last_free_area) = &MP_STATE_MEM(area);
+    for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area; area = NEXT_AREA(area))
+    #else    
+    mp_state_mem_area_t *area = &MP_STATE_MEM(area);
     #endif
-    for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
-        area->gc_last_free_atb_index = 0;
+    {
+        if (gc_should_compact()) {
+            gc_forward_table_t forward_table;
+            gc_compute_forwarding_addresses(area, &forward_table);
+            gc_compact_copy(area, &forward_table);
+            gc_update_references(area, &forward_table);
+            gc_forward_table_free(&forward_table);
+        }
     }
-    MP_STATE_THREAD(gc_lock_depth) &= ~GC_COLLECT_FLAG;
+    
     GC_EXIT();
 }
 
