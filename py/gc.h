@@ -30,6 +30,8 @@
 #include <stddef.h>
 #include "py/mpprint.h"
 
+typedef struct _mp_state_mem_area_t mp_state_mem_area_t;
+
 void gc_init(void *start, void *end);
 
 #if MICROPY_GC_SPLIT_HEAP
@@ -75,6 +77,12 @@ void gc_ref_map_insert(gc_ref_map_t *map, void *old_ptr, void *new_ptr);
 void *gc_ref_map_lookup(gc_ref_map_t *map, void *old_ptr);
 void gc_ref_map_deinit(gc_ref_map_t *map);
 
+//###################################//
+//                                   //
+//       Object pinning code         //
+//                                   // 
+//###################################//
+
 enum {
     GC_ALLOC_FLAG_HAS_FINALISER = 1,
     GC_ALLOC_FLAG_IS_PINNED = 2,
@@ -118,5 +126,33 @@ void gc_pin(void* ptr);
 void gc_unpin(void* ptr);
 bool gc_is_pinned(void* ptr);
 bool gc_is_block_pinned(size_t block);
+
+//###################################//
+//                                   //
+//     Block compaction code         //
+//                                   // 
+//###################################//
+
+typedef struct {
+    size_t old_block;
+    size_t new_block;
+} gc_forward_entry_t;
+
+typedef struct {
+    gc_forward_entry_t *entries;
+    size_t count;
+    size_t capacity;
+} gc_forward_table_t;
+
+typedef struct {
+    size_t compact_ptr;
+    size_t mark_block;
+    bool in_progress;
+} gc_compact_state_t;
+
+void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
+void gc_compact_copy(mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
+void gc_update_references(mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
+
 
 #endif // MICROPY_INCLUDED_PY_GC_H

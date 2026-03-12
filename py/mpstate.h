@@ -35,6 +35,7 @@
 #include "py/obj.h"
 #include "py/objlist.h"
 #include "py/objexcept.h"
+#include "py/gc.h"
 
 // This file contains structures defining the state of the MicroPython
 // memory system, runtime and virtual machine.  The state is a global
@@ -117,6 +118,9 @@ typedef struct _mp_state_mem_area_t {
     size_t gc_last_used_block_from_left;   // Tracks left frontier
     size_t gc_last_used_block_from_right;  // Tracks right frontier
     size_t gc_num_blocks;                   // Total blocks in area
+
+    gc_forward_table_t gc_forward_table;
+    gc_compact_state_t gc_compact_state;
 } mp_state_mem_area_t;
 
 // This structure hold information about the memory allocation system.

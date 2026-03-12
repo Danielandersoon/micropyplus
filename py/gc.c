@@ -208,7 +208,6 @@ static void gc_setup_area(mp_state_mem_area_t *area, void *start, void *end) {
     area->gc_last_free_atb_index = 0;
     area->gc_last_used_block = 0;
 
-    size_t gc_pool_block_len = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
     area->gc_last_used_block_from_left = (size_t)-1;
     area->gc_last_used_block_from_right = gc_pool_block_len;
     area->gc_num_blocks = gc_pool_block_len;
@@ -569,8 +568,38 @@ void gc_sweep_all(void) {
     gc_collect_end();
 }
 
+static bool gc_should_compact(void) {
+    /* Calculate fragmentation without acquiring lock (we're already in GC)
+    // Just check if we have significant fragmentation
+    // For now, always compact (can be optimized later with threshold) */
+    return false;
+}
+
+// Function to free forward table
+void gc_forward_table_free(gc_forward_table_t *table) {
+    if (table->entries != NULL) {
+        m_free(table->entries, table->capacity * sizeof(gc_forward_entry_t));
+        table->entries = NULL;
+    }
+    table->count = 0;
+    table->capacity = 0;
+}
+
 void gc_collect_end(void) {
     gc_deal_with_stack_overflow();
+
+    if (gc_should_compact()) {
+        DEBUG_printf("gc_collect_end: starting compaction\n");
+        for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
+            gc_forward_table_t forward_table;
+            
+            gc_compute_forwarding_addresses(area, &forward_table);
+            gc_compact_copy(area, &forward_table);
+            gc_update_references(area, &forward_table);
+            gc_forward_table_free(&forward_table);
+        }
+    }
+
     gc_sweep_run_finalisers();
     gc_sweep_free_blocks();
     #if MICROPY_GC_SPLIT_HEAP
@@ -1540,10 +1569,11 @@ void gc_pin(void* ptr) {
         size_t new_capacity = gc_pinned_table.capacity == 0 ? 
                                PINNED_TABLE_INITIAL_CAPACITY : 
                                gc_pinned_table.capacity * 2;
+        size_t old_size = gc_pinned_table.capacity * sizeof(pinned_range_t);
+        size_t new_size = new_capacity * sizeof(pinned_range_t);
         
         pinned_range_t *new_ranges = (pinned_range_t *)m_realloc(gc_pinned_table.ranges, 
-                                                                  gc_pinned_table.capacity * sizeof(pinned_range_t),
-                                                                  new_capacity * sizeof(pinned_range_t));
+                                                                  old_size, new_size);
         if (new_ranges == NULL) {
             GC_EXIT();
             return;  // Allocation failed
@@ -1629,6 +1659,7 @@ bool gc_is_block_pinned(size_t block) {
 }
 
 // Validate pinned table entries after GC - remove entries for freed objects
+__attribute__((unused))
 static void gc_pinned_validate(void) {
     for (ssize_t i = (ssize_t)gc_pinned_table.count - 1; i >= 0; i--) {
         pinned_range_t *range = &gc_pinned_table.ranges[i];
@@ -1665,6 +1696,223 @@ remove_entry:
                     (gc_pinned_table.count - i - 1) * sizeof(pinned_range_t));
         }
         gc_pinned_table.count--;
+    }
+}
+
+// Function to initialize forward table
+static void gc_forward_table_init(gc_forward_table_t *table) {
+    table->entries = NULL;
+    table->count = 0;
+    table->capacity = 0;
+}
+
+// Function to insert a forwarding entry
+static bool gc_forward_table_insert(gc_forward_table_t *table, size_t old_block, size_t new_block) {
+    // Expand table if needed
+    if (table->count >= table->capacity) {
+        size_t new_capacity = table->capacity == 0 ? 16 : table->capacity * 2;
+        gc_forward_entry_t *new_entries = (gc_forward_entry_t *)m_realloc(table->entries,
+                                                                           table->capacity * sizeof(gc_forward_entry_t),
+                                                                           new_capacity * sizeof(gc_forward_entry_t));
+        if (new_entries == NULL) {
+            return false;
+        }
+        table->entries = new_entries;
+        table->capacity = new_capacity;
+    }
+
+    table->entries[table->count].old_block = old_block;
+    table->entries[table->count].new_block = new_block;
+    table->count++;
+    return true;
+}
+
+// Function to lookup forwarding address
+static size_t gc_forward_table_lookup(gc_forward_table_t *table, size_t old_block) {
+    for (size_t i = 0; i < table->count; i++) {
+        if (table->entries[i].old_block == old_block) {
+            return table->entries[i].new_block;
+        }
+    }
+    return (size_t)-1;
+}
+
+
+// Maps old block positions to new compacted positions
+void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
+    // Initialize forward table
+    gc_forward_table_init(forward_table);
+
+    // Start compacting from left frontier
+    size_t compact_ptr = area->gc_last_used_block_from_left == (size_t)-1 ? 0 : 0;
+
+    // Iterate through all blocks in the heap
+    size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
+
+    for (size_t block = 0; block < max_block; block++) {
+        byte block_kind = ATB_GET_KIND(area, block);
+
+        // Only process HEAD blocks
+        if (block_kind == AT_MARK) {
+            // Count the number of consecutive blocks
+            size_t block_count = 1;
+            size_t next_block = block + 1;
+            while (next_block < max_block && ATB_GET_KIND(area, next_block) == AT_TAIL) {
+                block_count++;
+                next_block++;
+            }
+
+            // Check if this object is pinned
+            if (gc_is_block_pinned(block)) {
+                // Pinned objects don't move
+                if (!gc_forward_table_insert(forward_table, block, block)) {
+                    DEBUG_printf("gc_compute_forwarding_addresses: failed to insert pinned object\n");
+                    return;
+                }
+                DEBUG_printf("gc_compute_forwarding: pinned object at block %zu stays at %zu\n", block, block);
+            } else {
+                // Check for collision with right frontier
+                if (compact_ptr + block_count > area->gc_last_used_block_from_right) {
+                    DEBUG_printf("gc_compute_forwarding_addresses: collision detected at block %zu\n", block);
+                    gc_forward_table_free(forward_table);
+                    return;
+                }
+
+                // Record the forwarding address
+                if (!gc_forward_table_insert(forward_table, block, compact_ptr)) {
+                    DEBUG_printf("gc_compute_forwarding_addresses: failed to insert mapping\n");
+                    return;
+                }
+
+                DEBUG_printf("gc_compute_forwarding: block %zu (%zu blocks) -> %zu\n", block, block_count, compact_ptr);
+
+                // Move compact pointer forward by the number of blocks in this object
+                compact_ptr += block_count;
+            }
+
+            block = next_block - 1;
+        }
+    }
+
+    DEBUG_printf("gc_compute_forwarding_addresses: compacted to %zu blocks\n", compact_ptr);
+}
+
+// Updates allocation table for new block positions
+void gc_compact_copy(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
+    DEBUG_printf("gc_compact_copy: starting copy phase\n");
+
+    // Iterate through all blocks and copy those that need to move
+    size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
+
+    for (size_t block = 0; block < max_block; block++) {
+        byte block_kind = ATB_GET_KIND(area, block);
+
+        // Only process HEAD blocks
+        if (block_kind == AT_MARK) {
+            // Count the number of consecutive blocks (HEAD + TAILs)
+            size_t block_count = 1;
+            size_t next_block = block + 1;
+            while (next_block < max_block && ATB_GET_KIND(area, next_block) == AT_TAIL) {
+                block_count++;
+                next_block++;
+            }
+
+            // Look up the new position from the forwarding table
+            size_t new_block = gc_forward_table_lookup(forward_table, block);
+            if (new_block == (size_t)-1) {
+                // Not found in forwarding table (if here bad things)
+                DEBUG_printf("gc_compact_copy: block %zu not in forwarding table\n", block);
+                continue;
+            }
+
+            // If object doesn't move, skip copy
+            if (new_block == block) {
+                DEBUG_printf("gc_compact_copy: block %zu stays in place (pinned)\n", block);
+                // Still need to convert MARK -> HEAD for sweep phase
+                ATB_MARK_TO_HEAD(area, block);
+                block = next_block - 1;
+                continue;
+            }
+
+            // Copy object data from old location to new
+            byte *src = (byte *)PTR_FROM_BLOCK(area, block);
+            byte *dst = (byte *)PTR_FROM_BLOCK(area, new_block);
+            size_t copy_size = block_count * BYTES_PER_BLOCK;
+
+            DEBUG_printf("gc_compact_copy: copying %zu blocks: block %zu (%p) -> block %zu (%p)\n",
+                         block_count, block, src, new_block, dst);
+
+            memmove(dst, src, copy_size);
+
+            // Update allocation table for new location
+            ATB_FREE_TO_HEAD(area, new_block);
+            for (size_t i = new_block + 1; i < new_block + block_count; i++) {
+                ATB_FREE_TO_TAIL(area, i);
+            }
+
+            // Clear allocation table at old location
+            for (size_t i = 0; i < block_count; i++) {
+                ATB_ANY_TO_FREE(area, block + i);
+            }
+
+            #if CLEAR_ON_SWEEP
+            memset(src, 0, copy_size);
+            #endif
+
+            block = next_block - 1;
+        }
+    }
+
+    DEBUG_printf("gc_compact_copy: copy phase complete\n");
+}
+
+void gc_update_references(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
+    size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
+
+    for (size_t block = 0; block < max_block; block++) {
+        byte block_kind = ATB_GET_KIND(area, block);
+    
+        // Process live objects
+        if (block_kind == AT_HEAD) {
+            // Count blocks in this object chain
+            size_t block_count = 1;
+            size_t next_block = block + 1;
+            while (next_block < max_block && ATB_GET_KIND(area, next_block) == AT_TAIL) {
+                block_count++;
+                next_block++;
+            }
+
+            // Get pointer to obj start
+            void** obj_start = (void **)PTR_FROM_BLOCK(area, block);
+            size_t words_count = (block_count * BYTES_PER_BLOCK) / sizeof(void*);
+
+            for (size_t i = 0; i < words_count; i++) {
+                void* ref_ptr = obj_start[i];
+                mp_state_mem_area_t *ref_area;
+                #if MICROPY_GC_SPLIT_HEAP
+                ref_area = gc_get_ptr_area(ref_ptr);
+                #else
+                if (VERIFY_PTR(ref_ptr)) {
+                    ref_area = &MP_STATE_MEM(area);
+                } else {
+                    continue;
+                }
+                #endif
+
+                if (ref_area) {
+                    size_t old_block = BLOCK_FROM_PTR(ref_area, ref_ptr);
+                    size_t new_block = gc_forward_table_lookup(forward_table, old_block);
+                    if (new_block != (size_t)-1 && new_block != old_block) {
+                        // Update reference to new block position
+                        obj_start[i] = (void *)PTR_FROM_BLOCK(ref_area, new_block);
+                        DEBUG_printf("gc_update_references: updated reference in block %zu word %zu: block %zu -> block %zu\n",
+                                     block, i, old_block, new_block);
+                    }
+                }
+            }
+
+            block = next_block - 1;
+        }
     }
 }
 
