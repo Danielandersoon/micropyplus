@@ -1718,6 +1718,72 @@ remove_entry:
     }
 }
 
+// Validate that raw address points to valid pinned object
+bool gc_ptr_validate(uintptr_t addr) {
+    GC_ENTER();
+    
+    bool result = false;
+    for (ssize_t i = 0; i < (ssize_t)gc_pinned_table.count; i++) {
+        pinned_range_t *range = &gc_pinned_table.ranges[i];
+        uintptr_t base = (uintptr_t)range->obj;
+        uintptr_t end = base + (range->block_count * BYTES_PER_BLOCK);
+        
+        if (addr >= base && addr < end) {
+            result = true;
+            break;
+        }
+    }
+    
+    GC_EXIT();
+    return result;
+}
+
+// Get the base pointer and size of pinned object by address
+bool gc_ptr_get_range(uintptr_t addr, void **base_ptr, size_t *size) {
+    GC_ENTER();
+    
+    bool result = false;
+    for (ssize_t i = 0; i < (ssize_t)gc_pinned_table.count; i++) {
+        pinned_range_t *range = &gc_pinned_table.ranges[i];
+        uintptr_t base = (uintptr_t)range->obj;
+        uintptr_t end = base + (range->block_count * BYTES_PER_BLOCK);
+        
+        if (addr >= base && addr < end) {
+            *base_ptr = range->obj;
+            *size = range->block_count * BYTES_PER_BLOCK;
+            result = true;
+            break;
+        }
+    }
+    
+    GC_EXIT();
+    return result;
+}
+
+// Offset a pinned pointer (with bounds checking)
+uintptr_t gc_ptr_offset(uintptr_t addr, ssize_t offset) {
+    GC_ENTER();
+    
+    uintptr_t result = 0;
+    for (ssize_t i = 0; i < (ssize_t)gc_pinned_table.count; i++) {
+        pinned_range_t *range = &gc_pinned_table.ranges[i];
+        uintptr_t base = (uintptr_t)range->obj;
+        uintptr_t end = base + (range->block_count * BYTES_PER_BLOCK);
+        
+        if (addr >= base && addr < end) {
+            uintptr_t new_addr = addr + offset;
+            // Bounds check
+            if (new_addr >= base && new_addr < end) {
+                result = new_addr;
+            }
+            break;
+        }
+    }
+    
+    GC_EXIT();
+    return result;
+}
+
 // Function to initialize forward table
 static void gc_forward_table_init(gc_forward_table_t *table) {
     table->entries = NULL;

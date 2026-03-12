@@ -129,6 +129,21 @@ bool gc_is_block_pinned(size_t block);
 
 //###################################//
 //                                   //
+//    Pointer to pinned objects      //
+//                                   // 
+//###################################//
+
+// Returns true if pointer is in pinned range & accessible
+bool gc_ptr_validate(uintptr_t addr);
+
+// Get the base pointer and size of a pinned object by address
+bool gc_ptr_get_range(uintptr_t addr, void **base_ptr, size_t *size);
+
+// Offset a pinned pointer (with bounds checking if enabled)
+uintptr_t gc_ptr_offset(uintptr_t addr, ssize_t offset);
+
+//###################################//
+//                                   //
 //     Block compaction code         //
 //                                   // 
 //###################################//

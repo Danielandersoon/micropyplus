@@ -58,6 +58,57 @@ static mp_obj_t py_gc_is_pinned(mp_obj_t obj) {
 }
 MP_DEFINE_CONST_FUN_OBJ_1(gc_is_pinned_obj, py_gc_is_pinned);
 
+// pin_ptr(): pin an object and return its raw address as an integer
+static mp_obj_t py_gc_pin_ptr(mp_obj_t obj) {
+    void *ptr = MP_OBJ_TO_PTR(obj);
+    gc_pin(ptr);
+    return mp_obj_new_int((mp_int_t)(uintptr_t)ptr);
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gc_pin_ptr_obj, py_gc_pin_ptr);
+
+// ptr_validate(): check if a raw pointer address is valid and pinned
+static mp_obj_t py_gc_ptr_validate(mp_obj_t addr_obj) {
+    mp_int_t addr = mp_obj_get_int(addr_obj);
+    return mp_obj_new_bool(gc_ptr_validate((uintptr_t)addr));
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gc_ptr_validate_obj, py_gc_ptr_validate);
+
+// ptr_offset(): safely offset a pointer within its pinned object bounds
+// Returns new address, or -1 if out of bounds
+static mp_obj_t py_gc_ptr_offset(mp_obj_t addr_obj, mp_obj_t offset_obj) {
+    mp_int_t addr = mp_obj_get_int(addr_obj);
+    mp_int_t offset = mp_obj_get_int(offset_obj);
+    uintptr_t new_addr = gc_ptr_offset((uintptr_t)addr, offset);
+    if (new_addr == 0) {
+        return MP_OBJ_NEW_SMALL_INT(-1);  // Out of bounds
+    }
+    return mp_obj_new_int((mp_int_t)new_addr);
+}
+MP_DEFINE_CONST_FUN_OBJ_2(gc_ptr_offset_obj, py_gc_ptr_offset);
+
+// ptr_read_byte(): safely read a byte from a pinned address
+static mp_obj_t py_gc_ptr_read_byte(mp_obj_t addr_obj) {
+    mp_int_t addr = mp_obj_get_int(addr_obj);
+    if (!gc_ptr_validate((uintptr_t)addr)) {
+        return MP_OBJ_NEW_SMALL_INT(-1);  // Invalid address
+    }
+    uint8_t value = *(uint8_t *)(uintptr_t)addr;
+    return MP_OBJ_NEW_SMALL_INT(value);
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gc_ptr_read_byte_obj, py_gc_ptr_read_byte);
+
+// ptr_write_byte(): safely write a byte to a pinned address
+static mp_obj_t py_gc_ptr_write_byte(mp_obj_t addr_obj, mp_obj_t value_obj) {
+    mp_int_t addr = mp_obj_get_int(addr_obj);
+    mp_int_t value = mp_obj_get_int(value_obj);
+    if (!gc_ptr_validate((uintptr_t)addr)) {
+        return MP_OBJ_NEW_SMALL_INT(-1); 
+    }
+    *(uint8_t *)(uintptr_t)addr = (uint8_t)value;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(gc_ptr_write_byte_obj, py_gc_ptr_write_byte);
+
 // disable(): disable the garbage collector
 static mp_obj_t gc_disable(void) {
     MP_STATE_MEM(gc_auto_collect_enabled) = 0;
@@ -98,6 +149,12 @@ static mp_obj_t gc_mem_alloc(void) {
 }
 MP_DEFINE_CONST_FUN_OBJ_0(gc_mem_alloc_obj, gc_mem_alloc);
 
+// obj_header_size(): return the size of MicroPython object headers  
+static mp_obj_t gc_obj_header_size(void) {
+    return MP_OBJ_NEW_SMALL_INT(sizeof(mp_obj_base_t));
+}
+MP_DEFINE_CONST_FUN_OBJ_0(gc_obj_header_size_obj, gc_obj_header_size);
+
 #if MICROPY_GC_ALLOC_THRESHOLD
 static mp_obj_t gc_threshold(size_t n_args, const mp_obj_t *args) {
     if (n_args == 0) {
@@ -128,6 +185,12 @@ static const mp_rom_map_elem_t mp_module_gc_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_pin), MP_ROM_PTR(&gc_pin_obj) },
     { MP_ROM_QSTR(MP_QSTR_unpin), MP_ROM_PTR(&gc_unpin_obj) },
     { MP_ROM_QSTR(MP_QSTR_is_pinned), MP_ROM_PTR(&gc_is_pinned_obj) },
+    { MP_ROM_QSTR(MP_QSTR_pin_ptr), MP_ROM_PTR(&gc_pin_ptr_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ptr_validate), MP_ROM_PTR(&gc_ptr_validate_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ptr_offset), MP_ROM_PTR(&gc_ptr_offset_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ptr_read_byte), MP_ROM_PTR(&gc_ptr_read_byte_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ptr_write_byte), MP_ROM_PTR(&gc_ptr_write_byte_obj) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_obj_header_size), MP_ROM_PTR(&gc_obj_header_size_obj) },
     #if MICROPY_GC_ALLOC_THRESHOLD
     { MP_ROM_QSTR(MP_QSTR_threshold), MP_ROM_PTR(&gc_threshold_obj) },
     #endif
