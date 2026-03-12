@@ -139,7 +139,7 @@ static void gc_sweep_free_blocks(void);
 static pinned_table_t gc_pinned_table = {NULL, 0, 0};
 
 // Initial capacity for pinned table (will grow dynamically)
-#define PINNED_TABLE_INITIAL_CAPACITY (8)
+#define PINNED_TABLE_INITIAL_CAPACITY (32)
 
 // Helper function to find pinned range by block (binary search would be optimal for larger tables)
 static ssize_t gc_pinned_find_range_by_block(size_t block) {
@@ -616,6 +616,9 @@ void gc_collect_end(void) {
             gc_forward_table_free(&forward_table);
         }
     }
+    
+    // Clear the GC collect flag before exiting
+    MP_STATE_THREAD(gc_lock_depth) &= ~GC_COLLECT_FLAG;
     
     GC_EXIT();
 }
@@ -1536,19 +1539,15 @@ void gc_pin(void* ptr) {
         return;
     }
 
-    GC_ENTER();
-
     // Get the area and block for this pointer
     mp_state_mem_area_t *area;
     #if MICROPY_GC_SPLIT_HEAP
     area = gc_get_ptr_area(ptr);
     if (!area) {
-        GC_EXIT();
         return;
     }
     #else
     if (!VERIFY_PTR(ptr)) {
-        GC_EXIT();
         return;
     }
     area = &MP_STATE_MEM(area);
@@ -1556,10 +1555,41 @@ void gc_pin(void* ptr) {
 
     size_t block = BLOCK_FROM_PTR(area, ptr);
 
+    GC_ENTER();
+
     // Check if already pinned
     if (gc_pinned_find_range_by_ptr(ptr) != -1) {
         GC_EXIT();
         return;  // Already pinned
+    }
+
+    // Check if we need to expand the table
+    bool needs_expansion = gc_pinned_table.count >= gc_pinned_table.capacity;
+    if (needs_expansion) {
+        GC_EXIT();  // Release lock before memory allocation
+        
+        size_t new_capacity = gc_pinned_table.capacity == 0 ? 
+                               PINNED_TABLE_INITIAL_CAPACITY : 
+                               gc_pinned_table.capacity * 2;
+        size_t old_size = gc_pinned_table.capacity * sizeof(pinned_range_t);
+        size_t new_size = new_capacity * sizeof(pinned_range_t);
+        
+        pinned_range_t *new_ranges = (pinned_range_t *)m_realloc(gc_pinned_table.ranges, 
+                                                                  old_size, new_size);
+        if (new_ranges == NULL) {
+            return;  // Allocation failed
+        }
+        
+        GC_ENTER();  // Re-acquire lock after memory allocation
+        
+        gc_pinned_table.ranges = new_ranges;
+        gc_pinned_table.capacity = new_capacity;
+        
+        // Re-check if already pinned (another thread might have pinned it)
+        if (gc_pinned_find_range_by_ptr(ptr) != -1) {
+            GC_EXIT();
+            return;  // Already pinned
+        }
     }
 
     // Count the number of consecutive blocks for this object
@@ -1570,25 +1600,6 @@ void gc_pin(void* ptr) {
         } else {
             break;
         }
-    }
-
-    // Expand pinned table if needed
-    if (gc_pinned_table.count >= gc_pinned_table.capacity) {
-        size_t new_capacity = gc_pinned_table.capacity == 0 ? 
-                               PINNED_TABLE_INITIAL_CAPACITY : 
-                               gc_pinned_table.capacity * 2;
-        size_t old_size = gc_pinned_table.capacity * sizeof(pinned_range_t);
-        size_t new_size = new_capacity * sizeof(pinned_range_t);
-        
-        pinned_range_t *new_ranges = (pinned_range_t *)m_realloc(gc_pinned_table.ranges, 
-                                                                  old_size, new_size);
-        if (new_ranges == NULL) {
-            GC_EXIT();
-            return;  // Allocation failed
-        }
-        
-        gc_pinned_table.ranges = new_ranges;
-        gc_pinned_table.capacity = new_capacity;
     }
 
     // Insert in sorted order by block_start (insertion sort)
