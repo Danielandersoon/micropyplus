@@ -194,6 +194,7 @@ PY_CORE_O_BASENAME = $(addprefix py/,\
 	modbuiltins.o \
 	modcollections.o \
 	modgc.o \
+	ref.o \
 	modio.o \
 	modmath.o \
 	modcmath.o \
