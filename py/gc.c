@@ -572,7 +572,7 @@ static bool gc_should_compact(void) {
     /* Calculate fragmentation without acquiring lock (we're already in GC)
     // Just check if we have significant fragmentation
     // For now, always compact (can be optimized later with threshold) */
-    return false;
+    return true;
 }
 
 // Function to free forward table
@@ -1829,7 +1829,7 @@ void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forward_table
     gc_forward_table_init(forward_table);
 
     // Start compacting from left frontier
-    size_t compact_ptr = area->gc_last_used_block_from_left == (size_t)-1 ? 0 : 0;
+    size_t compact_ptr = 0;
 
     // Iterate through all blocks in the heap
     size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
@@ -1846,6 +1846,19 @@ void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forward_table
                 block_count++;
                 next_block++;
             }
+
+        if (gc_is_block_pinned(block)) {
+            // Pinned objects don't move, but reserve space
+            gc_forward_table_insert(forward_table, block, block);
+            // Skip past pinned region
+            compact_ptr = MAX(compact_ptr, block + block_count);
+            DEBUG_printf("gc_compute_forwarding: pinned object at block %zu, reserving to %zu\n", 
+                        block, compact_ptr);
+        } else {
+            // Non-pinned objects compact into free space
+            gc_forward_table_insert(forward_table, block, compact_ptr);
+            compact_ptr += block_count;
+        }
 
             // Check if this object is pinned
             if (gc_is_block_pinned(block)) {
