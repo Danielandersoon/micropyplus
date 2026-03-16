@@ -250,6 +250,8 @@ static const mp_rom_map_elem_t pointer_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_address), MP_ROM_PTR(&pointer_address_get_obj) },
     { MP_ROM_QSTR(MP_QSTR_size), MP_ROM_PTR(&pointer_size_get_obj) },
     { MP_ROM_QSTR(MP_QSTR_get), MP_ROM_PTR(&pointer_get_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_unsafe), MP_ROM_PTR(&pointer_get_unsafe_obj) },
+    { MP_ROM_QSTR(MP_QSTR_set_unsafe), MP_ROM_PTR(&pointer_set_unsafe_obj) },
     { MP_ROM_QSTR(MP_QSTR_set), MP_ROM_PTR(&pointer_set_obj) },
     { MP_ROM_QSTR(MP_QSTR_offset), MP_ROM_PTR(&pointer_offset_obj) },
     { MP_ROM_QSTR(MP_QSTR_is_valid), MP_ROM_PTR(&pointer_is_valid_obj) },
