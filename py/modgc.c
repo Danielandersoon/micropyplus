@@ -66,6 +66,98 @@ static mp_obj_t py_gc_pin_ptr(mp_obj_t obj) {
 }
 MP_DEFINE_CONST_FUN_OBJ_1(gc_pin_ptr_obj, py_gc_pin_ptr);
 
+//********************//
+//                    //
+// Type aware pinning //
+//                    //
+//********************//
+
+static mp_obj_t gc_pin_int16(mp_obj_t value_obj) {
+    // Create a bytearray container for the integer
+    mp_int_t value = mp_obj_get_int(value_obj);
+    
+    // Allocate 2 bytes of memory for the integer
+    uint8_t *data = (uint8_t *)m_malloc(2);
+    
+    // Store integer in little-endian format
+    data[0] = (uint8_t)(value & 0xFF);
+    data[1] = (uint8_t)((value >> 8) & 0xFF);
+    
+    // Pin the memory
+    gc_pin(data);
+    
+    // Return pointer
+    return mp_obj_new_int((mp_int_t)(uintptr_t)data);
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gc_pin_int16_obj, gc_pin_int16);
+
+static mp_obj_t gc_py_unpin_int16(mp_obj_t ptr_obj) {
+    mp_int_t addr = mp_obj_get_int(ptr_obj);
+    void *ptr = (void *)(uintptr_t)addr;
+    gc_unpin(ptr);
+    m_free(ptr, 2);
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gc_unpin_int16_obj, gc_py_unpin_int16);
+
+static mp_obj_t gc_pin_int(mp_obj_t value_obj) {
+    // Create a 4-byte buffer for the integer
+    mp_int_t value = mp_obj_get_int(value_obj);
+    
+    // Allocate 4 bytes of memory for the integer
+    uint8_t *data = (uint8_t *)m_malloc(4);
+    
+    // Store integer in little-endian format
+    data[0] = (uint8_t)(value & 0xFF);
+    data[1] = (uint8_t)((value >> 8) & 0xFF);
+    data[2] = (uint8_t)((value >> 16) & 0xFF);
+    data[3] = (uint8_t)((value >> 24) & 0xFF);
+    
+    // Pin the memory
+    gc_pin(data);
+    
+    // Return pointer
+    return mp_obj_new_int((mp_int_t)(uintptr_t)data);
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gc_pin_int_obj, gc_pin_int);
+
+static mp_obj_t gc_py_unpin_int(mp_obj_t ptr_obj) {
+    mp_int_t addr = mp_obj_get_int(ptr_obj);
+    void *ptr = (void *)(uintptr_t)addr;
+    gc_unpin(ptr);
+    m_free(ptr, 4);
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gc_unpin_int_obj, gc_py_unpin_int);
+
+static mp_obj_t gc_pin_float(mp_obj_t value_obj) {
+    // Create a 4-byte buffer for the float
+    mp_float_t value = mp_obj_get_float(value_obj);
+    
+    // Allocate 4 bytes of memory for the float
+    uint8_t *data = (uint8_t *)m_malloc(4);
+    
+    // Store float safely using memcpy to avoid strict-aliasing issues
+    float f = (float)value;
+    memcpy(data, &f, sizeof(float));
+    
+    // Pin the memory
+    gc_pin(data);
+    
+    // Return pointer
+    return mp_obj_new_int((mp_int_t)(uintptr_t)data);
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gc_pin_float_obj, gc_pin_float);
+
+static mp_obj_t gc_py_unpin_float(mp_obj_t ptr_obj) {
+    mp_int_t addr = mp_obj_get_int(ptr_obj);
+    void *ptr = (void *)(uintptr_t)addr;
+    gc_unpin(ptr);
+    m_free(ptr, sizeof(float));
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gc_unpin_float_obj, gc_py_unpin_float);
+
 // ptr_validate(): check if a raw pointer address is valid and pinned
 static mp_obj_t py_gc_ptr_validate(mp_obj_t addr_obj) {
     mp_int_t addr = mp_obj_get_int(addr_obj);
@@ -183,6 +275,12 @@ static const mp_rom_map_elem_t mp_module_gc_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_mem_free), MP_ROM_PTR(&gc_mem_free_obj) },
     { MP_ROM_QSTR(MP_QSTR_mem_alloc), MP_ROM_PTR(&gc_mem_alloc_obj) },
     { MP_ROM_QSTR(MP_QSTR_pin), MP_ROM_PTR(&gc_pin_obj) },
+    { MP_ROM_QSTR(MP_QSTR_pin_int16), MP_ROM_PTR(&gc_pin_int16_obj) },
+    { MP_ROM_QSTR(MP_QSTR_unpin_int16), MP_ROM_PTR(&gc_unpin_int16_obj) },
+    { MP_ROM_QSTR(MP_QSTR_pin_int), MP_ROM_PTR(&gc_pin_int_obj) },
+    { MP_ROM_QSTR(MP_QSTR_unpin_int), MP_ROM_PTR(&gc_unpin_int_obj) },
+    { MP_ROM_QSTR(MP_QSTR_pin_float), MP_ROM_PTR(&gc_pin_float_obj) },
+    { MP_ROM_QSTR(MP_QSTR_unpin_float), MP_ROM_PTR(&gc_unpin_float_obj) },
     { MP_ROM_QSTR(MP_QSTR_unpin), MP_ROM_PTR(&gc_unpin_obj) },
     { MP_ROM_QSTR(MP_QSTR_is_pinned), MP_ROM_PTR(&gc_is_pinned_obj) },
     { MP_ROM_QSTR(MP_QSTR_pin_ptr), MP_ROM_PTR(&gc_pin_ptr_obj) },

@@ -211,6 +211,174 @@ static mp_obj_t pointer_read_byte(size_t n_args, const mp_obj_t *args) {
 }
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(pointer_read_byte_obj, 1, 2, pointer_read_byte);
 
+// ****************************** //
+//                                //
+//     Typed pointer get + set    //
+//                                //
+// ****************************** //
+
+static mp_obj_t pointer_get_int16(mp_obj_t self_in) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    if (!gc_ptr_validate(self->obj_address)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Pointer is no longer valid"));
+    }
+    int16_t value = *(int16_t *)(uintptr_t)self->address;
+    return mp_obj_new_int((mp_int_t)value);
+}
+MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_int16_obj, pointer_get_int16);
+
+static mp_obj_t pointer_set_int16(mp_obj_t self_in, mp_obj_t value_obj) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_int_t value = mp_obj_get_int(value_obj);
+    if (!gc_ptr_validate(self->obj_address)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Pointer is no longer valid"));
+    }
+    *(int16_t *)(uintptr_t)self->address = (int16_t)value;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_int16_obj, pointer_set_int16);
+
+static mp_obj_t pointer_get_int16_unsafe(mp_obj_t self_in) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    int16_t value = *(int16_t *)(uintptr_t)self->address;
+    return mp_obj_new_int((mp_int_t)value);
+}
+MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_int16_unsafe_obj, pointer_get_int16_unsafe);
+
+static mp_obj_t pointer_set_int16_unsafe(mp_obj_t self_in, mp_obj_t value_obj) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_int_t value = mp_obj_get_int(value_obj);
+    *(int16_t *)(uintptr_t)self->address = (int16_t)value;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_int16_unsafe_obj, pointer_set_int16_unsafe);
+
+static mp_obj_t pointer_get_int(mp_obj_t self_in) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    if (!gc_ptr_validate(self->obj_address)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Object no longer pinned"));
+    }
+    int32_t value = *(int32_t *)(uintptr_t)self->address;
+    return mp_obj_new_int((mp_int_t)value);
+}
+MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_int_obj, pointer_get_int);
+
+static mp_obj_t pointer_set_int(mp_obj_t self_in, mp_obj_t value_obj) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_int_t value = mp_obj_get_int(value_obj);
+    if (!gc_ptr_validate(self->obj_address)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Object no longer pinned"));
+    }
+    *(int32_t *)(uintptr_t)self->address = (int32_t)value;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_int_obj, pointer_set_int);
+
+static mp_obj_t pointer_get_int_unsafe(mp_obj_t self_in) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    int32_t value = *(int32_t *)(uintptr_t)self->address;
+    return mp_obj_new_int((mp_int_t)value);
+}
+MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_int_unsafe_obj, pointer_get_int_unsafe);
+
+static mp_obj_t pointer_set_int_unsafe(mp_obj_t self_in, mp_obj_t value_obj) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_int_t value = mp_obj_get_int(value_obj);
+    *(int32_t *)(uintptr_t)self->address = (int32_t)value;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_int_unsafe_obj, pointer_set_int_unsafe);
+
+// float access
+static mp_obj_t pointer_get_float(mp_obj_t self_in) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    if (!gc_ptr_validate(self->obj_address)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Object no longer pinned"));
+    }
+    float value = *(float *)(uintptr_t)self->address;
+    return mp_obj_new_float((mp_float_t)value);
+}
+MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_float_obj, pointer_get_float);
+
+static mp_obj_t pointer_set_float(mp_obj_t self_in, mp_obj_t value_obj) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_float_t value = mp_obj_get_float(value_obj);
+    if (!gc_ptr_validate(self->obj_address)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Object no longer pinned"));
+    }
+    *(float *)(uintptr_t)self->address = (float)value;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_float_obj, pointer_set_float);
+
+static mp_obj_t pointer_get_float_unsafe(mp_obj_t self_in) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    float value = *(float *)(uintptr_t)self->address;
+    return mp_obj_new_float((mp_float_t)value);
+}
+MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_float_unsafe_obj, pointer_get_float_unsafe);
+
+static mp_obj_t pointer_set_float_unsafe(mp_obj_t self_in, mp_obj_t value_obj) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_float_t value = mp_obj_get_float(value_obj);
+    *(float *)(uintptr_t)self->address = (float)value;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_float_unsafe_obj, pointer_set_float_unsafe);
+
+// In-place arithmetic operations (int)
+static mp_obj_t pointer_add_int(mp_obj_t self_in, mp_obj_t delta_obj) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    int32_t delta = mp_obj_get_int(delta_obj);
+    *(int32_t *)(uintptr_t)self->address += delta;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(pointer_add_int_obj, pointer_add_int);
+
+static mp_obj_t pointer_sub_int(mp_obj_t self_in, mp_obj_t delta_obj) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    int32_t delta = mp_obj_get_int(delta_obj);
+    *(int32_t *)(uintptr_t)self->address -= delta;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(pointer_sub_int_obj, pointer_sub_int);
+
+// In-place arithmetic operations (int16)
+static mp_obj_t pointer_add_int16(mp_obj_t self_in, mp_obj_t delta_obj) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    int16_t delta = mp_obj_get_int(delta_obj);
+    *(int16_t *)(uintptr_t)self->address += delta;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(pointer_add_int16_obj, pointer_add_int16);
+
+static mp_obj_t pointer_sub_int16(mp_obj_t self_in, mp_obj_t delta_obj) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    int16_t delta = mp_obj_get_int(delta_obj);
+    *(int16_t *)(uintptr_t)self->address -= delta;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(pointer_sub_int16_obj, pointer_sub_int16);
+
+// In-place arithmetic operations (float)
+static mp_obj_t pointer_add_float(mp_obj_t self_in, mp_obj_t delta_obj) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_float_t delta = mp_obj_get_float(delta_obj);
+    float *fptr = (float *)(uintptr_t)self->address;
+    *fptr = *fptr + (float)delta;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(pointer_add_float_obj, pointer_add_float);
+
+static mp_obj_t pointer_sub_float(mp_obj_t self_in, mp_obj_t delta_obj) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_float_t delta = mp_obj_get_float(delta_obj);
+    float *fptr = (float *)(uintptr_t)self->address;
+    *fptr = *fptr - (float)delta;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(pointer_sub_float_obj, pointer_sub_float);
+
 // Pointer.write_byte(value, offset=0) - write byte at pointer + offset
 static mp_obj_t pointer_write_byte(size_t n_args, const mp_obj_t *args) {
     mp_obj_pointer_t *self = MP_OBJ_TO_PTR(args[0]);
@@ -258,6 +426,24 @@ static const mp_rom_map_elem_t pointer_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_read_byte), MP_ROM_PTR(&pointer_read_byte_obj) },
     { MP_ROM_QSTR(MP_QSTR_write_byte), MP_ROM_PTR(&pointer_write_byte_obj) },
     { MP_ROM_QSTR(MP_QSTR_deref), MP_ROM_PTR(&pointer_deref_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_int), MP_ROM_PTR(&pointer_get_int_obj) },
+    { MP_ROM_QSTR(MP_QSTR_set_int), MP_ROM_PTR(&pointer_set_int_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_int_unsafe), MP_ROM_PTR(&pointer_get_int_unsafe_obj) },
+    { MP_ROM_QSTR(MP_QSTR_set_int_unsafe), MP_ROM_PTR(&pointer_set_int_unsafe_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_int16), MP_ROM_PTR(&pointer_get_int16_obj) },
+    { MP_ROM_QSTR(MP_QSTR_set_int16), MP_ROM_PTR(&pointer_set_int16_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_int16_unsafe), MP_ROM_PTR(&pointer_get_int16_unsafe_obj) },
+    { MP_ROM_QSTR(MP_QSTR_set_int16_unsafe), MP_ROM_PTR(&pointer_set_int16_unsafe_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_float), MP_ROM_PTR(&pointer_get_float_obj) },
+    { MP_ROM_QSTR(MP_QSTR_set_float), MP_ROM_PTR(&pointer_set_float_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_float_unsafe), MP_ROM_PTR(&pointer_get_float_unsafe_obj) },
+    { MP_ROM_QSTR(MP_QSTR_set_float_unsafe), MP_ROM_PTR(&pointer_set_float_unsafe_obj) },
+    { MP_ROM_QSTR(MP_QSTR_add_int), MP_ROM_PTR(&pointer_add_int_obj) },
+    { MP_ROM_QSTR(MP_QSTR_sub_int), MP_ROM_PTR(&pointer_sub_int_obj) },
+    { MP_ROM_QSTR(MP_QSTR_add_int16), MP_ROM_PTR(&pointer_add_int16_obj) },
+    { MP_ROM_QSTR(MP_QSTR_sub_int16), MP_ROM_PTR(&pointer_sub_int16_obj) },
+    { MP_ROM_QSTR(MP_QSTR_add_float), MP_ROM_PTR(&pointer_add_float_obj) },
+    { MP_ROM_QSTR(MP_QSTR_sub_float), MP_ROM_PTR(&pointer_sub_float_obj) },
 };
 static MP_DEFINE_CONST_DICT(pointer_locals_dict, pointer_locals_dict_table);
 
