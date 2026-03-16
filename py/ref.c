@@ -117,6 +117,26 @@ static mp_obj_t pointer_get(mp_obj_t self_in) {
 }
 MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_obj, pointer_get);
 
+//Pointer.get_unsafe() - unsafe dereference without validation (faster but sacrifices safety)
+// Returns the byte value at the pointer address without validating the pointer
+static mp_obj_t pointer_get_unsafe(mp_obj_t self_in) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    uint8_t value = *(uint8_t *)(uintptr_t)self->address;
+    return MP_OBJ_NEW_SMALL_INT(value);
+} 
+MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_unsafe_obj, pointer_get_unsafe);
+
+// Pointer.set_unsafe(value) - unsafe dereference assignment without validation (faster but sacrifices safety)
+// Sets the byte value at the pointer address without validating the pointer
+static mp_obj_t pointer_set_unsafe(mp_obj_t self_in, mp_obj_t value_obj) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_int_t value = mp_obj_get_int(value_obj);
+    *(uint8_t *)(uintptr_t)self->address = (uint8_t)value;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_unsafe_obj, pointer_set_unsafe);
+
+
 // Pointer.set(value) - dereference assignment (*ptr = value)
 static mp_obj_t pointer_set(mp_obj_t self_in, mp_obj_t value_obj) {
     mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
