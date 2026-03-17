@@ -38,14 +38,27 @@ size_t ref_get_size(mp_obj_t obj) {
 // Pointer Class Implementation   //
 //                                //
 // ############################## //
-// Pointer.__new__() - create from address
+// Pointer.__new__() - create from address with optional size
+// Usage: Pointer(address) or Pointer(address, size)
 static mp_obj_t pointer_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *args) {
-    mp_arg_check_num(n_args, n_kw, 1, 1, false);
+    mp_arg_check_num(n_args, n_kw, 1, 2, false);
     uintptr_t addr = mp_obj_get_int(args[0]);
     
     // Validate the address is pinned
     if (!gc_ptr_validate(addr)) {
         mp_raise_ValueError(MP_ERROR_TEXT("Address not pinned"));
+    }
+    
+    // Allocate Pointer object first
+    mp_obj_pointer_t *self = m_new_obj(mp_obj_pointer_t);
+    self->base.type = &mp_type_pointer;
+    self->address = addr;
+    self->obj_address = addr;
+    
+    // If size is provided, use it directly
+    if (n_args >= 2) {
+        self->size = mp_obj_get_int(args[1]);
+        return MP_OBJ_FROM_PTR(self);
     }
     
     // Try to detect if this is an array/bytearray object and extract buffer address
@@ -61,9 +74,6 @@ static mp_obj_t pointer_make_new(const mp_obj_type_t *type, size_t n_args, size_
         // Note: arr->len is in elements, we want bytes
         size_t item_size = 1; // for bytearray it's always 1 byte per element
         
-        // Allocate Pointer object
-        mp_obj_pointer_t *self = m_new_obj(mp_obj_pointer_t);
-        self->base.type = &mp_type_pointer;
         self->address = buffer_addr;  // Buffer address for dereferencing
         self->obj_address = addr;      // Original object address for validation
         self->size = arr->len * item_size; // Size in bytes
@@ -71,19 +81,16 @@ static mp_obj_t pointer_make_new(const mp_obj_type_t *type, size_t n_args, size_
         return MP_OBJ_FROM_PTR(self);
     }
     
-    // For non-array objects, use the original logic
+    // For non-array objects, try to determine bounds
     void *base_ptr;
     size_t size;
-    if (!gc_ptr_get_range(addr, &base_ptr, &size)) {
-        mp_raise_ValueError(MP_ERROR_TEXT("Cannot determine object bounds"));
+    if (gc_ptr_get_range(addr, &base_ptr, &size)) {
+        self->size = size;
+    } else {
+        // If we can't determine the size, default to a safe small size
+        // This is a fallback - ideally the user should provide explicit size
+        self->size = 1;  // Default to 1 byte
     }
-    
-    // Allocate Pointer object
-    mp_obj_pointer_t *self = m_new_obj(mp_obj_pointer_t);
-    self->base.type = &mp_type_pointer;
-    self->address = addr;
-    self->obj_address = addr;  // Same as address for non-array objects
-    self->size = size;
     
     return MP_OBJ_FROM_PTR(self);
 }
@@ -252,6 +259,42 @@ static mp_obj_t pointer_set_int16_unsafe(mp_obj_t self_in, mp_obj_t value_obj) {
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_int16_unsafe_obj, pointer_set_int16_unsafe);
+
+static mp_obj_t pointer_get_int64(mp_obj_t self_in) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    if (!gc_ptr_validate(self->obj_address)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Pointer is no longer valid"));
+    }
+    int64_t value = *(int64_t *)(uintptr_t)self->address;
+    return mp_obj_new_int((mp_int_t)value);
+}
+MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_int64_obj, pointer_get_int64);
+
+static mp_obj_t pointer_set_int64(mp_obj_t self_in, mp_obj_t value_obj) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_int_t value = mp_obj_get_int(value_obj);
+    if (!gc_ptr_validate(self->obj_address)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Pointer is no longer valid"));
+    }
+    *(int64_t *)(uintptr_t)self->address = (int64_t)value;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_int64_obj, pointer_set_int64);
+
+static mp_obj_t pointer_get_int64_unsafe(mp_obj_t self_in) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    int64_t value = *(int64_t *)(uintptr_t)self->address;
+    return mp_obj_new_int((mp_int_t)value);
+}
+MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_int64_unsafe_obj, pointer_get_int64_unsafe);
+
+static mp_obj_t pointer_set_int64_unsafe(mp_obj_t self_in, mp_obj_t value_obj) {
+    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_int_t value = mp_obj_get_int(value_obj);
+    *(int64_t *)(uintptr_t)self->address = (int64_t)value;
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_int64_unsafe_obj, pointer_set_int64_unsafe);
 
 static mp_obj_t pointer_get_int(mp_obj_t self_in) {
     mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
@@ -434,6 +477,10 @@ static const mp_rom_map_elem_t pointer_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_set_int16), MP_ROM_PTR(&pointer_set_int16_obj) },
     { MP_ROM_QSTR(MP_QSTR_get_int16_unsafe), MP_ROM_PTR(&pointer_get_int16_unsafe_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_int16_unsafe), MP_ROM_PTR(&pointer_set_int16_unsafe_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_int64), MP_ROM_PTR(&pointer_get_int64_obj) },
+    { MP_ROM_QSTR(MP_QSTR_set_int64), MP_ROM_PTR(&pointer_set_int64_obj) },
+    { MP_ROM_QSTR(MP_QSTR_get_int64_unsafe), MP_ROM_PTR(&pointer_get_int64_unsafe_obj) },
+    { MP_ROM_QSTR(MP_QSTR_set_int64_unsafe), MP_ROM_PTR(&pointer_set_int64_unsafe_obj) },
     { MP_ROM_QSTR(MP_QSTR_get_float), MP_ROM_PTR(&pointer_get_float_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_float), MP_ROM_PTR(&pointer_set_float_obj) },
     { MP_ROM_QSTR(MP_QSTR_get_float_unsafe), MP_ROM_PTR(&pointer_get_float_unsafe_obj) },
