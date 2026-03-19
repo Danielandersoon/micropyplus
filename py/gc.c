@@ -141,22 +141,35 @@ static pinned_table_t gc_pinned_table = {NULL, 0, 0};
 // Initial capacity for pinned table (will grow dynamically)
 #define PINNED_TABLE_INITIAL_CAPACITY (32)
 
-// Helper function to find pinned range by block (binary search would be optimal for larger tables)
+// Helper function to find pinned range by block (binary search for O(log n) performance)
 static ssize_t gc_pinned_find_range_by_block(size_t block) {
-    for (ssize_t i = 0; i < (ssize_t)gc_pinned_table.count; i++) {
-        pinned_range_t *range = &gc_pinned_table.ranges[i];
+    ssize_t left = 0, right = (ssize_t)gc_pinned_table.count - 1;
+    while (left <= right) {
+        ssize_t mid = (left + right) / 2;
+        pinned_range_t *range = &gc_pinned_table.ranges[mid];
         if (block >= range->block_start && block < range->block_start + range->block_count) {
-            return i;
+            return mid;
+        } else if (block < range->block_start) {
+            right = mid - 1;
+        } else {
+            left = mid + 1;
         }
     }
     return -1;
 }
 
-// Helper function to find range by pointer
+// Helper function to find range by pointer (binary search for O(log n) performance)
 static ssize_t gc_pinned_find_range_by_ptr(const void *ptr) {
-    for (ssize_t i = 0; i < (ssize_t)gc_pinned_table.count; i++) {
-        if (gc_pinned_table.ranges[i].obj == ptr) {
-            return i;
+    ssize_t left = 0, right = (ssize_t)gc_pinned_table.count - 1;
+    while (left <= right) {
+        ssize_t mid = (left + right) / 2;
+        pinned_range_t *range = &gc_pinned_table.ranges[mid];
+        if (range->obj == ptr) {
+            return mid;
+        } else if ((uintptr_t)ptr < (uintptr_t)range->obj) {
+            right = mid - 1;
+        } else {
+            left = mid + 1;
         }
     }
     return -1;
@@ -1539,7 +1552,7 @@ void gc_pin(void* ptr) {
         return;
     }
 
-    // Get the area and block for this pointer
+    // Get the area and block for this pointer (before acquiring lock)
     mp_state_mem_area_t *area;
     #if MICROPY_GC_SPLIT_HEAP
     area = gc_get_ptr_area(ptr);
@@ -1555,6 +1568,17 @@ void gc_pin(void* ptr) {
 
     size_t block = BLOCK_FROM_PTR(area, ptr);
 
+    // Count consecutive blocks BEFORE lock to minimize lock hold time
+    size_t block_count = 1;  // HEAD block
+    size_t max_blocks = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
+    for (size_t bl = block + 1; bl < max_blocks; bl++) {
+        if (ATB_GET_KIND(area, bl) == AT_TAIL) {
+            block_count++;
+        } else {
+            break;
+        }
+    }
+
     GC_ENTER();
 
     // Check if already pinned
@@ -1564,8 +1588,7 @@ void gc_pin(void* ptr) {
     }
 
     // Check if we need to expand the table
-    bool needs_expansion = gc_pinned_table.count >= gc_pinned_table.capacity;
-    if (needs_expansion) {
+    if (gc_pinned_table.count >= gc_pinned_table.capacity) {
         GC_EXIT();  // Release lock before memory allocation
         
         size_t new_capacity = gc_pinned_table.capacity == 0 ? 
@@ -1592,36 +1615,11 @@ void gc_pin(void* ptr) {
         }
     }
 
-    // Count the number of consecutive blocks for this object
-    size_t block_count = 1;  // HEAD block
-    for (size_t bl = block + 1; bl < area->gc_alloc_table_byte_len * BLOCKS_PER_ATB; bl++) {
-        if (ATB_GET_KIND(area, bl) == AT_TAIL) {
-            block_count++;
-        } else {
-            break;
-        }
-    }
-
-    // Insert in sorted order by block_start (insertion sort)
-    size_t insert_pos = gc_pinned_table.count;
-    for (size_t i = 0; i < gc_pinned_table.count; i++) {
-        if (block < gc_pinned_table.ranges[i].block_start) {
-            insert_pos = i;
-            break;
-        }
-    }
-
-    // Shift entries to make room
-    if (insert_pos < gc_pinned_table.count) {
-        memmove(&gc_pinned_table.ranges[insert_pos + 1],
-                &gc_pinned_table.ranges[insert_pos],
-                (gc_pinned_table.count - insert_pos) * sizeof(pinned_range_t));
-    }
-
-    // Add the new pinned range
-    gc_pinned_table.ranges[insert_pos].obj = ptr;
-    gc_pinned_table.ranges[insert_pos].block_start = block;
-    gc_pinned_table.ranges[insert_pos].block_count = block_count;
+    // Append to end instead of inserting in middle: O(1) vs O(n) memmove
+    // Improves performance dramatically when pinning multiple objects
+    gc_pinned_table.ranges[gc_pinned_table.count].obj = ptr;
+    gc_pinned_table.ranges[gc_pinned_table.count].block_start = block;
+    gc_pinned_table.ranges[gc_pinned_table.count].block_count = block_count;
     gc_pinned_table.count++;
 
     DEBUG_printf("gc_pin(%p) at block %zu (count=%zu)\n", ptr, block, gc_pinned_table.count);

@@ -15,11 +15,24 @@
 
 #if MICROPY_ENABLE_GC
 
+// Inline helpers to reduce casting overhead in hot paths
+// Force inline for maximum performance in tight loops
+static inline __attribute__((always_inline)) mp_obj_pointer_t *pointer_obj_cast(mp_obj_t obj) {
+    return MP_OBJ_TO_PTR(obj);
+}
+
+static inline __attribute__((always_inline)) uintptr_t pointer_get_addr_fast(mp_obj_t obj) {
+    return pointer_obj_cast(obj)->address;
+}
+
+static inline __attribute__((always_inline)) bool pointer_validate_fast(uintptr_t obj_addr) {
+    return gc_ptr_validate(obj_addr);
+}
+
 // Helper: Get address from Pointer object
 uintptr_t ref_get_address(mp_obj_t obj) {
     if (mp_obj_is_type(obj, &mp_type_pointer)) {
-        mp_obj_pointer_t *ptr_obj = MP_OBJ_TO_PTR(obj);
-        return ptr_obj->address;
+        return pointer_obj_cast(obj)->address;
     }
     return 0;
 }
@@ -27,8 +40,7 @@ uintptr_t ref_get_address(mp_obj_t obj) {
 // Helper: Get size from Pointer object
 size_t ref_get_size(mp_obj_t obj) {
     if (mp_obj_is_type(obj, &mp_type_pointer)) {
-        mp_obj_pointer_t *ptr_obj = MP_OBJ_TO_PTR(obj);
-        return ptr_obj->size;
+        return pointer_obj_cast(obj)->size;
     }
     return 0;
 }
@@ -97,64 +109,56 @@ static mp_obj_t pointer_make_new(const mp_obj_type_t *type, size_t n_args, size_
 
 // Pointer.address property - get the raw address
 static mp_obj_t pointer_address_get(mp_obj_t self_in) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    return mp_obj_new_int((mp_int_t)self->address);
+    return mp_obj_new_int((mp_int_t)pointer_obj_cast(self_in)->address);
 }
 MP_DEFINE_CONST_FUN_OBJ_1(pointer_address_get_obj, pointer_address_get);
 
 // Pointer.size property - get the size of referenced object
 static mp_obj_t pointer_size_get(mp_obj_t self_in) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    return mp_obj_new_int(self->size);
+    return mp_obj_new_int(pointer_obj_cast(self_in)->size);
 }
 MP_DEFINE_CONST_FUN_OBJ_1(pointer_size_get_obj, pointer_size_get);
 
 // Pointer.get() - dereference operator (*ptr)
 // Returns the byte value at the pointer address
-static mp_obj_t pointer_get(mp_obj_t self_in) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    
-    // Validate using the original object address (which is pinned)
+static inline mp_obj_t pointer_get(mp_obj_t self_in) {
+    mp_obj_pointer_t *self = pointer_obj_cast(self_in);
     if (!gc_ptr_validate(self->obj_address)) {
         mp_raise_ValueError(MP_ERROR_TEXT("Pointer is no longer valid"));
     }
-    
-    uint8_t value = *(uint8_t *)(uintptr_t)self->address;
-    return MP_OBJ_NEW_SMALL_INT(value);
+    // Direct dereference - compiler can inline
+    return MP_OBJ_NEW_SMALL_INT(*(uint8_t *)(uintptr_t)self->address);
 }
 MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_obj, pointer_get);
 
 //Pointer.get_unsafe() - unsafe dereference without validation (faster but sacrifices safety)
 // Returns the byte value at the pointer address without validating the pointer
-static mp_obj_t pointer_get_unsafe(mp_obj_t self_in) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    uint8_t value = *(uint8_t *)(uintptr_t)self->address;
-    return MP_OBJ_NEW_SMALL_INT(value);
+static inline __attribute__((always_inline)) mp_obj_t pointer_get_unsafe(mp_obj_t self_in) {
+    // Skip validation - caller's responsibility
+    return MP_OBJ_NEW_SMALL_INT(*(uint8_t *)(uintptr_t)pointer_obj_cast(self_in)->address);
 } 
 MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_unsafe_obj, pointer_get_unsafe);
 
 // Pointer.set_unsafe(value) - unsafe dereference assignment without validation (faster but sacrifices safety)
 // Sets the byte value at the pointer address without validating the pointer
-static mp_obj_t pointer_set_unsafe(mp_obj_t self_in, mp_obj_t value_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    mp_int_t value = mp_obj_get_int(value_obj);
-    *(uint8_t *)(uintptr_t)self->address = (uint8_t)value;
+static inline __attribute__((always_inline)) mp_obj_t pointer_set_unsafe(mp_obj_t self_in, mp_obj_t value_obj) {
+    *(uint8_t *)(uintptr_t)pointer_obj_cast(self_in)->address = (uint8_t)mp_obj_get_int(value_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_unsafe_obj, pointer_set_unsafe);
 
 
 // Pointer.set(value) - dereference assignment (*ptr = value)
-static mp_obj_t pointer_set(mp_obj_t self_in, mp_obj_t value_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    mp_int_t value = mp_obj_get_int(value_obj);
+static inline mp_obj_t pointer_set(mp_obj_t self_in, mp_obj_t value_obj) {
+    mp_obj_pointer_t *self = pointer_obj_cast(self_in);
     
-    // Validate using the original object address (which is pinned)
+    // Single validation call
     if (!gc_ptr_validate(self->obj_address)) {
         mp_raise_ValueError(MP_ERROR_TEXT("Pointer is no longer valid"));
     }
     
-    *(uint8_t *)(uintptr_t)self->address = (uint8_t)value;
+    // Direct write - compiler can inline
+    *(uint8_t *)(uintptr_t)self->address = (uint8_t)mp_obj_get_int(value_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_obj, pointer_set);
@@ -162,23 +166,20 @@ MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_obj, pointer_set);
 // Pointer.offset(n) - pointer arithmetic (ptr + n)
 // Returns a new Pointer object offset by n bytes
 static mp_obj_t pointer_offset(mp_obj_t self_in, mp_obj_t offset_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_obj_pointer_t *self = pointer_obj_cast(self_in);
     mp_int_t offset = mp_obj_get_int(offset_obj);
     
-    // Calculate new address by simple addition (safer for buffer pointers)
-    uintptr_t new_addr = self->address + offset;
-    
-    // Check bounds: new address should be within size from original address
+    // Early bounds check - avoid allocation on invalid offset
     if (offset < 0 || (size_t)offset >= self->size) {
         mp_raise_ValueError(MP_ERROR_TEXT("Offset out of bounds"));
     }
     
-    // Create new Pointer object at offset address
+    // Create new Pointer object at offset address (inlined allocation)
     mp_obj_pointer_t *new_ptr = m_new_obj(mp_obj_pointer_t);
     new_ptr->base.type = &mp_type_pointer;
-    new_ptr->address = new_addr;
-    new_ptr->obj_address = self->obj_address;  // Keep same object address
-    new_ptr->size = self->size - offset;  // Remaining size from offset
+    new_ptr->address = self->address + offset;
+    new_ptr->obj_address = self->obj_address;
+    new_ptr->size = self->size - offset;
     
     return MP_OBJ_FROM_PTR(new_ptr);
 }
@@ -186,8 +187,7 @@ MP_DEFINE_CONST_FUN_OBJ_2(pointer_offset_obj, pointer_offset);
 
 // Pointer.is_valid() - check if pointer is still valid
 static mp_obj_t pointer_is_valid(mp_obj_t self_in) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    return mp_obj_new_bool(gc_ptr_validate(self->obj_address));
+    return mp_obj_new_bool(pointer_validate_fast(pointer_obj_cast(self_in)->obj_address));
 }
 MP_DEFINE_CONST_FUN_OBJ_1(pointer_is_valid_obj, pointer_is_valid);
 
@@ -224,200 +224,164 @@ MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(pointer_read_byte_obj, 1, 2, pointer_read_by
 //                                //
 // ****************************** //
 
-static mp_obj_t pointer_get_int16(mp_obj_t self_in) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+// Optimized typed operations with reduced casting overhead
+static inline mp_obj_t pointer_get_int16(mp_obj_t self_in) {
+    mp_obj_pointer_t *self = pointer_obj_cast(self_in);
     if (!gc_ptr_validate(self->obj_address)) {
         mp_raise_ValueError(MP_ERROR_TEXT("Pointer is no longer valid"));
     }
-    int16_t value = *(int16_t *)(uintptr_t)self->address;
-    return mp_obj_new_int((mp_int_t)value);
+    return MP_OBJ_NEW_SMALL_INT(*(int16_t *)(uintptr_t)self->address);
 }
 MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_int16_obj, pointer_get_int16);
 
 static mp_obj_t pointer_set_int16(mp_obj_t self_in, mp_obj_t value_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    mp_int_t value = mp_obj_get_int(value_obj);
+    mp_obj_pointer_t *self = pointer_obj_cast(self_in);
     if (!gc_ptr_validate(self->obj_address)) {
         mp_raise_ValueError(MP_ERROR_TEXT("Pointer is no longer valid"));
     }
-    *(int16_t *)(uintptr_t)self->address = (int16_t)value;
+    *(int16_t *)(uintptr_t)self->address = (int16_t)mp_obj_get_int(value_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_int16_obj, pointer_set_int16);
 
-static mp_obj_t pointer_get_int16_unsafe(mp_obj_t self_in) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    int16_t value = *(int16_t *)(uintptr_t)self->address;
-    return mp_obj_new_int((mp_int_t)value);
+static inline __attribute__((always_inline)) mp_obj_t pointer_get_int16_unsafe(mp_obj_t self_in) {
+    // Inline minimal cast - let compiler optimize fully
+    return MP_OBJ_NEW_SMALL_INT(*(int16_t *)(uintptr_t)pointer_obj_cast(self_in)->address);
 }
 MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_int16_unsafe_obj, pointer_get_int16_unsafe);
 
-static mp_obj_t pointer_set_int16_unsafe(mp_obj_t self_in, mp_obj_t value_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    mp_int_t value = mp_obj_get_int(value_obj);
-    *(int16_t *)(uintptr_t)self->address = (int16_t)value;
+static inline __attribute__((always_inline)) mp_obj_t pointer_set_int16_unsafe(mp_obj_t self_in, mp_obj_t value_obj) {
+    *(int16_t *)(uintptr_t)pointer_obj_cast(self_in)->address = (int16_t)mp_obj_get_int(value_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_int16_unsafe_obj, pointer_set_int16_unsafe);
 
 static mp_obj_t pointer_get_int64(mp_obj_t self_in) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_obj_pointer_t *self = pointer_obj_cast(self_in);
     if (!gc_ptr_validate(self->obj_address)) {
         mp_raise_ValueError(MP_ERROR_TEXT("Pointer is no longer valid"));
     }
-    int64_t value = *(int64_t *)(uintptr_t)self->address;
-    return mp_obj_new_int((mp_int_t)value);
+    return MP_OBJ_NEW_SMALL_INT(*(int64_t *)(uintptr_t)self->address);
 }
 MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_int64_obj, pointer_get_int64);
 
 static mp_obj_t pointer_set_int64(mp_obj_t self_in, mp_obj_t value_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    mp_int_t value = mp_obj_get_int(value_obj);
+    mp_obj_pointer_t *self = pointer_obj_cast(self_in);
     if (!gc_ptr_validate(self->obj_address)) {
         mp_raise_ValueError(MP_ERROR_TEXT("Pointer is no longer valid"));
     }
-    *(int64_t *)(uintptr_t)self->address = (int64_t)value;
+    *(int64_t *)(uintptr_t)self->address = (int64_t)mp_obj_get_int(value_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_int64_obj, pointer_set_int64);
 
-static mp_obj_t pointer_get_int64_unsafe(mp_obj_t self_in) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    int64_t value = *(int64_t *)(uintptr_t)self->address;
-    return mp_obj_new_int((mp_int_t)value);
+static inline __attribute__((always_inline)) mp_obj_t pointer_get_int64_unsafe(mp_obj_t self_in) {
+    // Inline all operations - let compiler optimize fully
+    return MP_OBJ_NEW_SMALL_INT(*(int64_t *)(uintptr_t)pointer_obj_cast(self_in)->address);
 }
 MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_int64_unsafe_obj, pointer_get_int64_unsafe);
 
-static mp_obj_t pointer_set_int64_unsafe(mp_obj_t self_in, mp_obj_t value_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    mp_int_t value = mp_obj_get_int(value_obj);
-    *(int64_t *)(uintptr_t)self->address = (int64_t)value;
+static inline __attribute__((always_inline)) mp_obj_t pointer_set_int64_unsafe(mp_obj_t self_in, mp_obj_t value_obj) {
+    *(int64_t *)(uintptr_t)pointer_obj_cast(self_in)->address = (int64_t)mp_obj_get_int(value_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_int64_unsafe_obj, pointer_set_int64_unsafe);
 
 static mp_obj_t pointer_get_int(mp_obj_t self_in) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    if (!gc_ptr_validate(self->obj_address)) {
+    mp_obj_pointer_t *self = pointer_obj_cast(self_in);
+    if (!pointer_validate_fast(self->obj_address)) {
         mp_raise_ValueError(MP_ERROR_TEXT("Object no longer pinned"));
     }
-    int32_t value = *(int32_t *)(uintptr_t)self->address;
-    return mp_obj_new_int((mp_int_t)value);
+    return MP_OBJ_NEW_SMALL_INT(*(int32_t *)(uintptr_t)self->address);
 }
 MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_int_obj, pointer_get_int);
 
 static mp_obj_t pointer_set_int(mp_obj_t self_in, mp_obj_t value_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    mp_int_t value = mp_obj_get_int(value_obj);
-    if (!gc_ptr_validate(self->obj_address)) {
+    mp_obj_pointer_t *self = pointer_obj_cast(self_in);
+    if (!pointer_validate_fast(self->obj_address)) {
         mp_raise_ValueError(MP_ERROR_TEXT("Object no longer pinned"));
     }
-    *(int32_t *)(uintptr_t)self->address = (int32_t)value;
+    *(int32_t *)(uintptr_t)self->address = (int32_t)mp_obj_get_int(value_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_int_obj, pointer_set_int);
 
-static mp_obj_t pointer_get_int_unsafe(mp_obj_t self_in) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    int32_t value = *(int32_t *)(uintptr_t)self->address;
-    return mp_obj_new_int((mp_int_t)value);
+static inline __attribute__((always_inline)) mp_obj_t pointer_get_int_unsafe(mp_obj_t self_in) {
+    return mp_obj_new_int(*(int32_t *)(uintptr_t)pointer_obj_cast(self_in)->address);
 }
 MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_int_unsafe_obj, pointer_get_int_unsafe);
 
-static mp_obj_t pointer_set_int_unsafe(mp_obj_t self_in, mp_obj_t value_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    mp_int_t value = mp_obj_get_int(value_obj);
-    *(int32_t *)(uintptr_t)self->address = (int32_t)value;
+static inline __attribute__((always_inline)) mp_obj_t pointer_set_int_unsafe(mp_obj_t self_in, mp_obj_t value_obj) {
+    *(int32_t *)(uintptr_t)pointer_obj_cast(self_in)->address = (int32_t)mp_obj_get_int(value_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_int_unsafe_obj, pointer_set_int_unsafe);
 
-// float access
 static mp_obj_t pointer_get_float(mp_obj_t self_in) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    if (!gc_ptr_validate(self->obj_address)) {
+    mp_obj_pointer_t *self = pointer_obj_cast(self_in);
+    if (!pointer_validate_fast(self->obj_address)) {
         mp_raise_ValueError(MP_ERROR_TEXT("Object no longer pinned"));
     }
-    float value = *(float *)(uintptr_t)self->address;
-    return mp_obj_new_float((mp_float_t)value);
+    return mp_obj_new_float(*(float *)(uintptr_t)self->address);
 }
 MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_float_obj, pointer_get_float);
 
 static mp_obj_t pointer_set_float(mp_obj_t self_in, mp_obj_t value_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    mp_float_t value = mp_obj_get_float(value_obj);
-    if (!gc_ptr_validate(self->obj_address)) {
+    mp_obj_pointer_t *self = pointer_obj_cast(self_in);
+    if (!pointer_validate_fast(self->obj_address)) {
         mp_raise_ValueError(MP_ERROR_TEXT("Object no longer pinned"));
     }
-    *(float *)(uintptr_t)self->address = (float)value;
+    *(float *)(uintptr_t)self->address = (float)mp_obj_get_float(value_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_float_obj, pointer_set_float);
 
 static mp_obj_t pointer_get_float_unsafe(mp_obj_t self_in) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    float value = *(float *)(uintptr_t)self->address;
-    return mp_obj_new_float((mp_float_t)value);
+    return mp_obj_new_float(*(float *)(uintptr_t)pointer_obj_cast(self_in)->address);
 }
 MP_DEFINE_CONST_FUN_OBJ_1(pointer_get_float_unsafe_obj, pointer_get_float_unsafe);
 
 static mp_obj_t pointer_set_float_unsafe(mp_obj_t self_in, mp_obj_t value_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    mp_float_t value = mp_obj_get_float(value_obj);
-    *(float *)(uintptr_t)self->address = (float)value;
+    *(float *)(uintptr_t)pointer_obj_cast(self_in)->address = (float)mp_obj_get_float(value_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_set_float_unsafe_obj, pointer_set_float_unsafe);
 
-// In-place arithmetic operations (int)
-static mp_obj_t pointer_add_int(mp_obj_t self_in, mp_obj_t delta_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    int32_t delta = mp_obj_get_int(delta_obj);
-    *(int32_t *)(uintptr_t)self->address += delta;
+// In-place arithmetic operations (int) - optimized
+static inline mp_obj_t pointer_add_int(mp_obj_t self_in, mp_obj_t delta_obj) {
+    *(int32_t *)(uintptr_t)pointer_obj_cast(self_in)->address += (int32_t)mp_obj_get_int(delta_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_add_int_obj, pointer_add_int);
 
-static mp_obj_t pointer_sub_int(mp_obj_t self_in, mp_obj_t delta_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    int32_t delta = mp_obj_get_int(delta_obj);
-    *(int32_t *)(uintptr_t)self->address -= delta;
+static inline mp_obj_t pointer_sub_int(mp_obj_t self_in, mp_obj_t delta_obj) {
+    *(int32_t *)(uintptr_t)pointer_obj_cast(self_in)->address -= (int32_t)mp_obj_get_int(delta_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_sub_int_obj, pointer_sub_int);
 
-// In-place arithmetic operations (int16)
-static mp_obj_t pointer_add_int16(mp_obj_t self_in, mp_obj_t delta_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    int16_t delta = mp_obj_get_int(delta_obj);
-    *(int16_t *)(uintptr_t)self->address += delta;
+// In-place arithmetic operations (int16) - optimized for hot paths
+static inline mp_obj_t pointer_add_int16(mp_obj_t self_in, mp_obj_t delta_obj) {
+    *(int16_t *)(uintptr_t)pointer_obj_cast(self_in)->address += (int16_t)mp_obj_get_int(delta_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_add_int16_obj, pointer_add_int16);
 
-static mp_obj_t pointer_sub_int16(mp_obj_t self_in, mp_obj_t delta_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    int16_t delta = mp_obj_get_int(delta_obj);
-    *(int16_t *)(uintptr_t)self->address -= delta;
+static inline mp_obj_t pointer_sub_int16(mp_obj_t self_in, mp_obj_t delta_obj) {
+    *(int16_t *)(uintptr_t)pointer_obj_cast(self_in)->address -= (int16_t)mp_obj_get_int(delta_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_sub_int16_obj, pointer_sub_int16);
 
-// In-place arithmetic operations (float)
-static mp_obj_t pointer_add_float(mp_obj_t self_in, mp_obj_t delta_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    mp_float_t delta = mp_obj_get_float(delta_obj);
-    float *fptr = (float *)(uintptr_t)self->address;
-    *fptr = *fptr + (float)delta;
+// In-place arithmetic operations (float) - optimized
+static inline mp_obj_t pointer_add_float(mp_obj_t self_in, mp_obj_t delta_obj) {
+    *(float *)(uintptr_t)pointer_obj_cast(self_in)->address += (float)mp_obj_get_float(delta_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_add_float_obj, pointer_add_float);
 
-static mp_obj_t pointer_sub_float(mp_obj_t self_in, mp_obj_t delta_obj) {
-    mp_obj_pointer_t *self = MP_OBJ_TO_PTR(self_in);
-    mp_float_t delta = mp_obj_get_float(delta_obj);
-    float *fptr = (float *)(uintptr_t)self->address;
-    *fptr = *fptr - (float)delta;
+static inline mp_obj_t pointer_sub_float(mp_obj_t self_in, mp_obj_t delta_obj) {
+    *(float *)(uintptr_t)pointer_obj_cast(self_in)->address -= (float)mp_obj_get_float(delta_obj);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(pointer_sub_float_obj, pointer_sub_float);
