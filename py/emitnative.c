@@ -2660,6 +2660,22 @@ static void emit_native_binary_op(emit_t *emit, mp_binary_op_t op) {
     }
 }
 
+// Pointer dereference operation (placeholder)
+static void emit_native_pointer_deref(emit_t *emit) {
+    (void)emit;
+}
+
+// Address-of operation (placeholder)
+static void emit_native_address_of(emit_t *emit) {
+    (void)emit;
+}
+
+// Pointer member access operation (placeholder)
+static void emit_native_pointer_member_access(emit_t *emit, qstr member) {
+    (void)emit;
+    (void)member;
+}
+
 #if MICROPY_PY_BUILTINS_SLICE
 static void emit_native_build_slice(emit_t *emit, mp_uint_t n_args);
 #endif
@@ -3102,6 +3118,9 @@ const emit_method_table_t EXPORT_FUN(method_table) = {
     emit_native_pop_except_jump,
     emit_native_unary_op,
     emit_native_binary_op,
+    emit_native_pointer_deref,
+    emit_native_address_of,
+    emit_native_pointer_member_access,
     emit_native_build,
     emit_native_store_map,
     emit_native_store_comp,

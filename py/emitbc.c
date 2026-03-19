@@ -729,6 +729,22 @@ void mp_emit_bc_binary_op(emit_t *emit, mp_binary_op_t op) {
     }
 }
 
+// Pointer dereference operation - placeholder
+void mp_emit_bc_pointer_deref(emit_t *emit) {
+    emit_write_bytecode_byte(emit, -1, 255);  // Placeholder bytecode
+}
+
+// Address-of operation - placeholder
+void mp_emit_bc_address_of(emit_t *emit) {
+    emit_write_bytecode_byte(emit, 0, 254);  // Placeholder bytecode
+}
+
+// Pointer member access operation - placeholder
+void mp_emit_bc_pointer_member_access(emit_t *emit, qstr member) {
+    emit_write_bytecode_byte(emit, -1, 253);  // Placeholder bytecode
+    emit_write_bytecode_byte(emit, 0, member);  // Member name as index
+}
+
 void mp_emit_bc_build(emit_t *emit, mp_uint_t n_args, int kind) {
     MP_STATIC_ASSERT(MP_BC_BUILD_TUPLE + MP_EMIT_BUILD_TUPLE == MP_BC_BUILD_TUPLE);
     MP_STATIC_ASSERT(MP_BC_BUILD_TUPLE + MP_EMIT_BUILD_LIST == MP_BC_BUILD_LIST);
@@ -893,6 +909,9 @@ const emit_method_table_t emit_bc_method_table = {
     mp_emit_bc_pop_except_jump,
     mp_emit_bc_unary_op,
     mp_emit_bc_binary_op,
+    mp_emit_bc_pointer_deref,
+    mp_emit_bc_address_of,
+    mp_emit_bc_pointer_member_access,
     mp_emit_bc_build,
     mp_emit_bc_store_map,
     mp_emit_bc_store_comp,
