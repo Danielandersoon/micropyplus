@@ -60,32 +60,8 @@ void gc_collect_end(void);
 // Use this function to sweep the whole heap and run all finalisers
 void gc_sweep_all(void);
 
-// Reference Map / Hash Table for tracking object moves or smart pointers
-typedef struct _gc_ref_entry_t {
-    void *key;
-    void *value;
-} gc_ref_entry_t;
-
-typedef struct _gc_ref_map_t {
-    gc_ref_entry_t *entries;
-    size_t size;
-    size_t count;
-} gc_ref_map_t;
-
-void gc_ref_map_init(gc_ref_map_t *map, size_t size);
-void gc_ref_map_insert(gc_ref_map_t *map, void *old_ptr, void *new_ptr);
-void *gc_ref_map_lookup(gc_ref_map_t *map, void *old_ptr);
-void gc_ref_map_deinit(gc_ref_map_t *map);
-
-//###################################//
-//                                   //
-//       Object pinning code         //
-//                                   // 
-//###################################//
-
 enum {
     GC_ALLOC_FLAG_HAS_FINALISER = 1,
-    GC_ALLOC_FLAG_IS_PINNED = 2,
 };
 
 void *gc_alloc(size_t n_bytes, unsigned int alloc_flags);
@@ -109,23 +85,6 @@ typedef struct _gc_info_t {
 void gc_info(gc_info_t *info);
 void gc_dump_info(const mp_print_t *print);
 void gc_dump_alloc_table(const mp_print_t *print);
-
-typedef struct {
-    void* obj;
-    size_t block_start;
-    size_t block_count;
-} pinned_range_t;
-
-typedef struct {
-    pinned_range_t *ranges;
-    size_t count;
-    size_t capacity;
-} pinned_table_t;
-
-void gc_pin(void* ptr);
-void gc_unpin(void* ptr);
-bool gc_is_pinned(void* ptr);
-bool gc_is_block_pinned(size_t block);
 
 //###################################//
 //                                   //
@@ -153,6 +112,5 @@ typedef struct {
 void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
 void gc_compact_copy(mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
 void gc_update_references(mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
-
 
 #endif // MICROPY_INCLUDED_PY_GC_H

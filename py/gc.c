@@ -135,33 +135,6 @@ static void gc_deal_with_stack_overflow(void);
 static void gc_sweep_run_finalisers(void);
 static void gc_sweep_free_blocks(void);
 
-// Pinned objects tracking
-static pinned_table_t gc_pinned_table = {NULL, 0, 0};
-
-// Initial capacity for pinned table (will grow dynamically)
-#define PINNED_TABLE_INITIAL_CAPACITY (8)
-
-// Helper function to find pinned range by block (binary search would be optimal for larger tables)
-static ssize_t gc_pinned_find_range_by_block(size_t block) {
-    for (ssize_t i = 0; i < (ssize_t)gc_pinned_table.count; i++) {
-        pinned_range_t *range = &gc_pinned_table.ranges[i];
-        if (block >= range->block_start && block < range->block_start + range->block_count) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-// Helper function to find range by pointer
-static ssize_t gc_pinned_find_range_by_ptr(const void *ptr) {
-    for (ssize_t i = 0; i < (ssize_t)gc_pinned_table.count; i++) {
-        if (gc_pinned_table.ranges[i].obj == ptr) {
-            return i;
-        }
-    }
-    return -1;
-}
-
 // TODO waste less memory; currently requires that all entries in alloc_table have a corresponding block in pool
 static void gc_setup_area(mp_state_mem_area_t *area, void *start, void *end) {
     // calculate parameters for GC (T=total, A=alloc table, F=finaliser table, P=pool; all in bytes):
@@ -208,10 +181,6 @@ static void gc_setup_area(mp_state_mem_area_t *area, void *start, void *end) {
     area->gc_last_free_atb_index = 0;
     area->gc_last_used_block = 0;
 
-    area->gc_last_used_block_from_left = (size_t)-1;
-    area->gc_last_used_block_from_right = gc_pool_block_len;
-    area->gc_num_blocks = gc_pool_block_len;
-
     #if MICROPY_GC_SPLIT_HEAP
     area->next = NULL;
     #endif
@@ -255,11 +224,6 @@ void gc_init(void *start, void *end) {
     MP_STATE_MEM(gc_alloc_threshold) = (size_t)-1;
     MP_STATE_MEM(gc_alloc_amount) = 0;
     #endif
-
-    // Initialize pinned table
-    gc_pinned_table.ranges = NULL;
-    gc_pinned_table.count = 0;
-    gc_pinned_table.capacity = 0;
 
     GC_MUTEX_INIT();
 }
@@ -572,7 +536,7 @@ static bool gc_should_compact(void) {
     /* Calculate fragmentation without acquiring lock (we're already in GC)
     // Just check if we have significant fragmentation
     // For now, always compact (can be optimized later with threshold) */
-    return false;
+    return true;
 }
 
 // Function to free forward table
@@ -693,12 +657,6 @@ static void gc_sweep_free_blocks(void) {
             MICROPY_GC_HOOK_LOOP(block);
             switch (ATB_GET_KIND(area, block)) {
                 case AT_HEAD:
-                    // Check if this block is pinned - don't free pinned objects
-                    if (gc_is_block_pinned(block)) {
-                        free_tail = 0;
-                        last_used_block = block;
-                        break;
-                    }
                     free_tail = 1;
                     DEBUG_printf("gc_sweep_free_blocks(%p)\n", (void *)PTR_FROM_BLOCK(area, block));
                     #if MICROPY_PY_GC_COLLECT_RETVAL
@@ -829,56 +787,10 @@ void gc_info(gc_info_t *info) {
     GC_EXIT();
 }
 
-// Allocate from the right side of heap for pinned objects
-// Returns block index where allocation starts, or (size_t)
-static size_t gc_alloc_right(mp_state_mem_area_t *area, size_t n_blocks) {
-    // Check for collision before attempting allocation
-    if (area->gc_last_used_block_from_left == (size_t)-1) {
-        // Left side free, safe to allocate
-    } else if (area->gc_last_used_block_from_left + n_blocks >= area->gc_last_used_block_from_right) {
-        // Collision detected
-        return (size_t)-1;
-    }
-
-    // Scan from right frontier looking for n_blocks FREE blocks
-    size_t n_free = 0;
-    size_t alloc_start = (size_t)-1;
-
-    for (size_t block = area->gc_last_used_block_from_right - 1; block > area->gc_last_used_block_from_left; block--) {
-        if (ATB_GET_KIND(area, block) == AT_FREE) {
-            n_free++;
-            if (n_free == n_blocks) {
-                alloc_start = block;
-                break;
-            }
-        } else {
-            n_free = 0;  // Reset counter when allocated block hit
-        }
-    }
-
-    if (alloc_start == (size_t)-1) {
-        // No consecutive free blocks
-        return (size_t)-1;
-    }
-
-    // Mark allocated blocks
-    size_t alloc_end = alloc_start + n_blocks - 1;
-    ATB_FREE_TO_HEAD(area, alloc_start);
-    for (size_t i = alloc_start + 1; i <= alloc_end; i++) {
-        ATB_FREE_TO_TAIL(area, i);
-    }
-
-    // Update right frontier
-    area->gc_last_used_block_from_right = alloc_start;
-
-    return alloc_start;
-}
-
 void *gc_alloc(size_t n_bytes, unsigned int alloc_flags) {
     bool has_finaliser = alloc_flags & GC_ALLOC_FLAG_HAS_FINALISER;
-    bool is_pinned = alloc_flags & GC_ALLOC_FLAG_IS_PINNED;
     size_t n_blocks = ((n_bytes + BYTES_PER_BLOCK - 1) & (~(BYTES_PER_BLOCK - 1))) / BYTES_PER_BLOCK;
-    DEBUG_printf("gc_alloc(" UINT_FMT " bytes -> " UINT_FMT " blocks, pinned=%d)\n", n_bytes, n_blocks, is_pinned);
+    DEBUG_printf("gc_alloc(" UINT_FMT " bytes -> " UINT_FMT " blocks)\n", n_bytes, n_blocks);
 
     // check for 0 allocation
     if (n_blocks == 0) {
@@ -891,65 +803,6 @@ void *gc_alloc(size_t n_bytes, unsigned int alloc_flags) {
     }
 
     GC_ENTER();
-
-    // Handle pinned object allocation from right
-    if (is_pinned) {
-        mp_state_mem_area_t *area;
-        int collected = !MP_STATE_MEM(gc_auto_collect_enabled);
-
-        for (;;) {
-            #if MICROPY_GC_SPLIT_HEAP
-            area = MP_STATE_MEM(gc_last_free_area);
-            if (!area) area = &MP_STATE_MEM(area);
-            #else
-            area = &MP_STATE_MEM(area);
-            #endif
-
-            size_t block = gc_alloc_right(area, n_blocks);
-            if (block != (size_t)-1) {
-                // Successfully allocated from right
-                size_t end_block = block + n_blocks - 1;
-                area->gc_last_used_block = MAX(area->gc_last_used_block, end_block);
-                
-                void *ret_ptr = (void *)(area->gc_pool_start + block * BYTES_PER_BLOCK);
-                DEBUG_printf("gc_alloc(pinned, %p)\n", ret_ptr);
-
-                #if MICROPY_GC_ALLOC_THRESHOLD
-                MP_STATE_MEM(gc_alloc_amount) += n_blocks;
-                #endif
-
-                GC_EXIT();
-
-                // Clear memory
-                #if MICROPY_GC_CONSERVATIVE_CLEAR
-                memset((byte *)ret_ptr, 0, n_blocks * BYTES_PER_BLOCK);
-                #else
-                memset((byte *)ret_ptr + n_bytes, 0, n_blocks * BYTES_PER_BLOCK - n_bytes);
-                #endif
-
-                #if MICROPY_ENABLE_FINALISER
-                if (has_finaliser) {
-                    ((mp_obj_base_t *)ret_ptr)->type = NULL;
-                    GC_ENTER();
-                    FTB_SET(area, block);
-                    GC_EXIT();
-                }
-                #endif
-
-                return ret_ptr;
-            }
-
-            // Allocation failed, run GC
-            GC_EXIT();
-            if (collected) {
-                return NULL;
-            }
-            DEBUG_printf("gc_alloc(pinned): no free mem, triggering GC\n");
-            gc_collect();
-            collected = 1;
-            GC_ENTER();
-        }
-    }
 
     mp_state_mem_area_t *area;
     size_t i;
@@ -1038,13 +891,6 @@ found:
     }
 
     area->gc_last_used_block = MAX(area->gc_last_used_block, end_block);
-
-    // Track left frontier
-    if (area->gc_last_used_block_from_left == (size_t)-1) {
-        area->gc_last_used_block_from_left = start_block;
-    } else {
-        area->gc_last_used_block_from_left = MAX(area->gc_last_used_block_from_left, end_block);
-    }
 
     // mark first block as used head
     ATB_FREE_TO_HEAD(area, start_block);
@@ -1135,27 +981,12 @@ void gc_free(void *ptr) {
     assert(ATB_GET_KIND(area, block) == AT_HEAD
         || (ATB_GET_KIND(area, block) == AT_MARK && (MP_STATE_THREAD(gc_lock_depth) & GC_COLLECT_FLAG)));
 
-    // Check if this object is pinned - cannot free pinned objects
-    if (gc_is_block_pinned(block)) {
-        GC_EXIT();
-        return;
-    }
-
     #if MICROPY_ENABLE_FINALISER
     FTB_CLEAR(area, block);
     #endif
 
     #if MICROPY_GC_SPLIT_HEAP
     if (MP_STATE_MEM(gc_last_free_area) != area) {
-        // We freed something but it isn't the current area. Reset the
-        // last free area to the start for a rescan. Note that this won't
-        // give much of a performance hit, since areas that are completely
-        // filled will likely be skipped (the gc_last_free_atb_index
-        // points to the last block).
-        // The reason why this is necessary is because it is not possible
-        // to see which area came first (like it is possible to adjust
-        // gc_last_free_atb_index based on whether the freed block is
-        // before the last free block).
         MP_STATE_MEM(gc_last_free_area) = &MP_STATE_MEM(area);
     }
     #endif
@@ -1165,24 +996,12 @@ void gc_free(void *ptr) {
         area->gc_last_free_atb_index = block / BLOCKS_PER_ATB;
     }
 
-    // Count consecutive blocks for this object to check if we're freeing from frontier
-    size_t block_start = block;
+    // Count consecutive blocks for this object
     size_t block_count = 1;
     size_t temp_block = block + 1;
     while (ATB_GET_KIND(area, temp_block) == AT_TAIL) {
         block_count++;
         temp_block++;
-    }
-
-    // Update left frontier if freeing at left edge
-    if (block_start <= area->gc_last_used_block_from_left && 
-        block_start + block_count - 1 == area->gc_last_used_block_from_left) {
-        area->gc_last_used_block_from_left = block_start - 1;
-    }
-
-    // Update right frontier if freeing at right edge
-    if (block_start == area->gc_last_used_block_from_right) {
-        area->gc_last_used_block_from_right = block_start + block_count;
     }
 
     // free head and all of its tail blocks
@@ -1522,183 +1341,6 @@ void gc_dump_alloc_table(const mp_print_t *print) {
     GC_EXIT();
 }
 
-// Pin an object to prevent garbage collection
-void gc_pin(void* ptr) {
-    if (ptr == NULL) {
-        return;
-    }
-
-    GC_ENTER();
-
-    // Get the area and block for this pointer
-    mp_state_mem_area_t *area;
-    #if MICROPY_GC_SPLIT_HEAP
-    area = gc_get_ptr_area(ptr);
-    if (!area) {
-        GC_EXIT();
-        return;
-    }
-    #else
-    if (!VERIFY_PTR(ptr)) {
-        GC_EXIT();
-        return;
-    }
-    area = &MP_STATE_MEM(area);
-    #endif
-
-    size_t block = BLOCK_FROM_PTR(area, ptr);
-
-    // Check if already pinned
-    if (gc_pinned_find_range_by_ptr(ptr) != -1) {
-        GC_EXIT();
-        return;  // Already pinned
-    }
-
-    // Count the number of consecutive blocks for this object
-    size_t block_count = 1;  // HEAD block
-    for (size_t bl = block + 1; bl < area->gc_alloc_table_byte_len * BLOCKS_PER_ATB; bl++) {
-        if (ATB_GET_KIND(area, bl) == AT_TAIL) {
-            block_count++;
-        } else {
-            break;
-        }
-    }
-
-    // Expand pinned table if needed
-    if (gc_pinned_table.count >= gc_pinned_table.capacity) {
-        size_t new_capacity = gc_pinned_table.capacity == 0 ? 
-                               PINNED_TABLE_INITIAL_CAPACITY : 
-                               gc_pinned_table.capacity * 2;
-        size_t old_size = gc_pinned_table.capacity * sizeof(pinned_range_t);
-        size_t new_size = new_capacity * sizeof(pinned_range_t);
-        
-        pinned_range_t *new_ranges = (pinned_range_t *)m_realloc(gc_pinned_table.ranges, 
-                                                                  old_size, new_size);
-        if (new_ranges == NULL) {
-            GC_EXIT();
-            return;  // Allocation failed
-        }
-        
-        gc_pinned_table.ranges = new_ranges;
-        gc_pinned_table.capacity = new_capacity;
-    }
-
-    // Insert in sorted order by block_start (insertion sort)
-    size_t insert_pos = gc_pinned_table.count;
-    for (size_t i = 0; i < gc_pinned_table.count; i++) {
-        if (block < gc_pinned_table.ranges[i].block_start) {
-            insert_pos = i;
-            break;
-        }
-    }
-
-    // Shift entries to make room
-    if (insert_pos < gc_pinned_table.count) {
-        memmove(&gc_pinned_table.ranges[insert_pos + 1],
-                &gc_pinned_table.ranges[insert_pos],
-                (gc_pinned_table.count - insert_pos) * sizeof(pinned_range_t));
-    }
-
-    // Add the new pinned range
-    gc_pinned_table.ranges[insert_pos].obj = ptr;
-    gc_pinned_table.ranges[insert_pos].block_start = block;
-    gc_pinned_table.ranges[insert_pos].block_count = block_count;
-    gc_pinned_table.count++;
-
-    DEBUG_printf("gc_pin(%p) at block %zu (count=%zu)\n", ptr, block, gc_pinned_table.count);
-
-    GC_EXIT();
-}
-
-// Unpin an object to allow garbage collection
-void gc_unpin(void* ptr) {
-    if (ptr == NULL) {
-        return;
-    }
-
-    GC_ENTER();
-
-    ssize_t idx = gc_pinned_find_range_by_ptr(ptr);
-    if (idx != -1) {
-        // Remove by shifting remaining entries
-        if ((size_t)idx < gc_pinned_table.count - 1) {
-            memmove(&gc_pinned_table.ranges[idx],
-                    &gc_pinned_table.ranges[idx + 1],
-                    (gc_pinned_table.count - idx - 1) * sizeof(pinned_range_t));
-        }
-        gc_pinned_table.count--;
-
-        DEBUG_printf("gc_unpin(%p) count=%zu\n", ptr, gc_pinned_table.count);
-    }
-
-    GC_EXIT();
-}
-
-// Check if a pointer is pinned
-bool gc_is_pinned(void* ptr) {
-    if (ptr == NULL) {
-        return false;
-    }
-
-    GC_ENTER();
-
-    bool result = (gc_pinned_find_range_by_ptr(ptr) != -1);
-
-    GC_EXIT();
-    return result;
-}
-
-// Check if a specific block is pinned
-bool gc_is_block_pinned(size_t block) {
-    GC_ENTER();
-
-    bool result = (gc_pinned_find_range_by_block(block) != -1);
-
-    GC_EXIT();
-    return result;
-}
-
-// Validate pinned table entries after GC - remove entries for freed objects
-__attribute__((unused))
-static void gc_pinned_validate(void) {
-    for (ssize_t i = (ssize_t)gc_pinned_table.count - 1; i >= 0; i--) {
-        pinned_range_t *range = &gc_pinned_table.ranges[i];
-        
-        // Find which area this range belongs to
-        mp_state_mem_area_t *area = NULL;
-        #if MICROPY_GC_SPLIT_HEAP
-        area = gc_get_ptr_area(range->obj);
-        if (!area) {
-            // Object is no longer in heap, remove from pinned table
-            goto remove_entry;
-        }
-        #else
-        if (!VERIFY_PTR(range->obj)) {
-            // Invalid pointer, remove from pinned table
-            goto remove_entry;
-        }
-        area = &MP_STATE_MEM(area);
-        #endif
-        
-        // Verify the block is still marked as allocated
-        if (ATB_GET_KIND(area, range->block_start) != AT_HEAD) {
-            // Block is no longer allocated, remove from pinned table
-            goto remove_entry;
-        }
-        
-        continue;
-        
-remove_entry:
-        // Remove this entry by shifting
-        if ((size_t)i < gc_pinned_table.count - 1) {
-            memmove(&gc_pinned_table.ranges[i],
-                    &gc_pinned_table.ranges[i + 1],
-                    (gc_pinned_table.count - i - 1) * sizeof(pinned_range_t));
-        }
-        gc_pinned_table.count--;
-    }
-}
-
 // Function to initialize forward table
 static void gc_forward_table_init(gc_forward_table_t *table) {
     table->entries = NULL;
@@ -1737,14 +1379,13 @@ static size_t gc_forward_table_lookup(gc_forward_table_t *table, size_t old_bloc
     return (size_t)-1;
 }
 
-
 // Maps old block positions to new compacted positions
 void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
     // Initialize forward table
     gc_forward_table_init(forward_table);
 
-    // Start compacting from left frontier
-    size_t compact_ptr = area->gc_last_used_block_from_left == (size_t)-1 ? 0 : 0;
+    // Start compacting from beginning
+    size_t compact_ptr = 0;
 
     // Iterate through all blocks in the heap
     size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
@@ -1762,33 +1403,16 @@ void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forward_table
                 next_block++;
             }
 
-            // Check if this object is pinned
-            if (gc_is_block_pinned(block)) {
-                // Pinned objects don't move
-                if (!gc_forward_table_insert(forward_table, block, block)) {
-                    DEBUG_printf("gc_compute_forwarding_addresses: failed to insert pinned object\n");
-                    return;
-                }
-                DEBUG_printf("gc_compute_forwarding: pinned object at block %zu stays at %zu\n", block, block);
-            } else {
-                // Check for collision with right frontier
-                if (compact_ptr + block_count > area->gc_last_used_block_from_right) {
-                    DEBUG_printf("gc_compute_forwarding_addresses: collision detected at block %zu\n", block);
-                    gc_forward_table_free(forward_table);
-                    return;
-                }
-
-                // Record the forwarding address
-                if (!gc_forward_table_insert(forward_table, block, compact_ptr)) {
-                    DEBUG_printf("gc_compute_forwarding_addresses: failed to insert mapping\n");
-                    return;
-                }
-
-                DEBUG_printf("gc_compute_forwarding: block %zu (%zu blocks) -> %zu\n", block, block_count, compact_ptr);
-
-                // Move compact pointer forward by the number of blocks in this object
-                compact_ptr += block_count;
+            // Record the forwarding address
+            if (!gc_forward_table_insert(forward_table, block, compact_ptr)) {
+                DEBUG_printf("gc_compute_forwarding_addresses: failed to insert mapping\n");
+                return;
             }
+
+            DEBUG_printf("gc_compute_forwarding: block %zu (%zu blocks) -> %zu\n", block, block_count, compact_ptr);
+
+            // Move compact pointer forward by the number of blocks in this object
+            compact_ptr += block_count;
 
             block = next_block - 1;
         }
@@ -1820,14 +1444,14 @@ void gc_compact_copy(mp_state_mem_area_t *area, gc_forward_table_t *forward_tabl
             // Look up the new position from the forwarding table
             size_t new_block = gc_forward_table_lookup(forward_table, block);
             if (new_block == (size_t)-1) {
-                // Not found in forwarding table (if here bad things)
+                // Not found in forwarding table
                 DEBUG_printf("gc_compact_copy: block %zu not in forwarding table\n", block);
                 continue;
             }
 
             // If object doesn't move, skip copy
             if (new_block == block) {
-                DEBUG_printf("gc_compact_copy: block %zu stays in place (pinned)\n", block);
+                DEBUG_printf("gc_compact_copy: block %zu stays in place\n", block);
                 // Still need to convert MARK -> HEAD for sweep phase
                 ATB_MARK_TO_HEAD(area, block);
                 block = next_block - 1;

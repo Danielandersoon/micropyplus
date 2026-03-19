@@ -114,11 +114,6 @@ typedef struct _mp_state_mem_area_t {
     size_t gc_last_free_atb_index;
     size_t gc_last_used_block; // The block ID of the highest block allocated in the area
 
-    // Bi-directional allocator fields
-    size_t gc_last_used_block_from_left;   // Tracks left frontier
-    size_t gc_last_used_block_from_right;  // Tracks right frontier
-    size_t gc_num_blocks;                   // Total blocks in area
-
     gc_forward_table_t gc_forward_table;
     gc_compact_state_t gc_compact_state;
 } mp_state_mem_area_t;
