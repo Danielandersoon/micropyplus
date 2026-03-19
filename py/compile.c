@@ -2297,6 +2297,31 @@ static void compile_factor_2(compiler_t *comp, mp_parse_node_struct_t *pns) {
     EMIT_ARG(unary_op, op);
 }
 
+// Pointer dereference: *ptr
+static void compile_ptr_deref(compiler_t *comp, mp_parse_node_struct_t *pns) {
+    compile_node(comp, pns->nodes[1]);
+    EMIT(pointer_deref);
+}
+
+// Address-of operator: &obj
+static void compile_ptr_addr_of(compiler_t *comp, mp_parse_node_struct_t *pns) {
+    compile_node(comp, pns->nodes[1]);
+    EMIT(address_of);
+}
+
+// Pointer member access: ptr->member
+static void compile_ptr_member_access(compiler_t *comp, mp_parse_node_struct_t *pns) {
+    compile_node(comp, pns->nodes[0]);
+    qstr member = MP_PARSE_NODE_LEAF_ARG(pns->nodes[1]);
+    EMIT_ARG(pointer_member_access, member);
+}
+
+// Trailer for pointer member access
+static void compile_trailer_ptr_member(compiler_t *comp, mp_parse_node_struct_t *pns) {
+    qstr member = MP_PARSE_NODE_LEAF_ARG(pns->nodes[1]);
+    EMIT_ARG(pointer_member_access, member);
+}
+
 static void compile_atom_expr_normal(compiler_t *comp, mp_parse_node_struct_t *pns) {
     // compile the subject of the expression
     compile_node(comp, pns->nodes[0]);
