@@ -119,6 +119,9 @@ typedef enum _mp_token_kind_t {
     MP_TOKEN_OP_PLUS,
     MP_TOKEN_OP_MINUS,
     MP_TOKEN_OP_STAR,
+    MP_TOKEN_OP_DEREF,      // * (pointer dereference)
+    MP_TOKEN_OP_ADDR_OF,    // & (address-of)
+    MP_TOKEN_OP_PTR_MEMBER, // -> (pointer member access)
     MP_TOKEN_OP_AT,
     MP_TOKEN_OP_DBL_SLASH,
     MP_TOKEN_OP_SLASH,

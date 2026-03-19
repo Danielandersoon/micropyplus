@@ -262,9 +262,10 @@ DEF_RULE(arith_expr, c(term), list, rule(term), rule(arith_op))
 DEF_RULE_NC(arith_op, or(2), tok(OP_PLUS), tok(OP_MINUS))
 DEF_RULE(term, c(term), list, rule(factor), rule(term_op))
 DEF_RULE_NC(term_op, or(5), tok(OP_STAR), tok(OP_AT), tok(OP_SLASH), tok(OP_PERCENT), tok(OP_DBL_SLASH))
-DEF_RULE_NC(factor, or(2), rule(factor_2), rule(power))
+DEF_RULE_NC(factor, or(3), rule(factor_2), rule(ptr_unary), rule(power))
 DEF_RULE(factor_2, c(factor_2), and_ident(2), rule(factor_op), rule(factor))
 DEF_RULE_NC(factor_op, or(3), tok(OP_PLUS), tok(OP_MINUS), tok(OP_TILDE))
+DEF_RULE_NC(ptr_unary, or(2), rule(ptr_deref), rule(ptr_addr_of))
 DEF_RULE(power, c(power), and_ident(2), rule(atom_expr), opt_rule(power_dbl_star))
 #if MICROPY_PY_ASYNC_AWAIT
 DEF_RULE_NC(atom_expr, or(2), rule(atom_expr_await), rule(atom_expr_normal))
@@ -276,9 +277,19 @@ DEF_RULE(atom_expr_normal, c(atom_expr_normal), and_ident(2), rule(atom), opt_ru
 DEF_RULE_NC(atom_expr_trailers, one_or_more, rule(trailer))
 DEF_RULE_NC(power_dbl_star, and_ident(2), tok(OP_DBL_STAR), rule(factor))
 
+// Pointer-specific rules
+// ptr_unary_op: '*' factor | '&' factor
+// ptr_member_access: '->' NAME
+// ptr_type_annotation: '*' [ptr_type_annotation] | NAME
+
+DEF_RULE(ptr_deref, c(ptr_deref), and(2), tok(OP_STAR), rule(factor))
+DEF_RULE(ptr_addr_of, c(ptr_addr_of), and(2), tok(OP_AMPERSAND), rule(factor))
+DEF_RULE(ptr_member_access, c(ptr_member_access), and(2), tok(DEL_MINUS_MORE), tok(NAME))
+DEF_RULE_NC(ptr_type_annotation, and_ident(2), tok(OP_STAR), opt_rule(ptr_type_annotation))
+
 // atom: '(' [yield_expr|testlist_comp] ')' | '[' [testlist_comp] ']' | '{' [dictorsetmaker] '}' | NAME | NUMBER | STRING+ | '...' | 'None' | 'True' | 'False'
 // testlist_comp: (test|star_expr) ( comp_for | (',' (test|star_expr))* [','] )
-// trailer: '(' [arglist] ')' | '[' subscriptlist ']' | '.' NAME
+// trailer: '(' [arglist] ')' | '[' subscriptlist ']' | '.' NAME | '->' NAME
 
 DEF_RULE_NC(atom, or(12), tok(NAME), tok(INTEGER), tok(FLOAT_OR_IMAG), tok(STRING), tok(BYTES), tok(ELLIPSIS), tok(KW_NONE), tok(KW_TRUE), tok(KW_FALSE), rule(atom_paren), rule(atom_bracket), rule(atom_brace))
 DEF_RULE(atom_paren, c(atom_paren), and(3), tok(DEL_PAREN_OPEN), opt_rule(atom_2b), tok(DEL_PAREN_CLOSE))
@@ -290,10 +301,11 @@ DEF_RULE_NC(testlist_comp_2, or(2), rule(star_expr), rule(namedexpr_test))
 DEF_RULE_NC(testlist_comp_3, or(2), rule(comp_for), rule(testlist_comp_3b))
 DEF_RULE_NC(testlist_comp_3b, and_ident(2), tok(DEL_COMMA), opt_rule(testlist_comp_3c))
 DEF_RULE_NC(testlist_comp_3c, list_with_end, rule(testlist_comp_2), tok(DEL_COMMA))
-DEF_RULE_NC(trailer, or(3), rule(trailer_paren), rule(trailer_bracket), rule(trailer_period))
+DEF_RULE_NC(trailer, or(4), rule(trailer_paren), rule(trailer_bracket), rule(trailer_period), rule(trailer_ptr_member))
 DEF_RULE(trailer_paren, c(trailer_paren), and(3), tok(DEL_PAREN_OPEN), opt_rule(arglist), tok(DEL_PAREN_CLOSE))
 DEF_RULE(trailer_bracket, c(trailer_bracket), and(3), tok(DEL_BRACKET_OPEN), rule(subscriptlist), tok(DEL_BRACKET_CLOSE))
 DEF_RULE(trailer_period, c(trailer_period), and(2), tok(DEL_PERIOD), tok(NAME))
+DEF_RULE(trailer_ptr_member, c(trailer_ptr_member), and(2), tok(DEL_MINUS_MORE), tok(NAME))
 
 // subscriptlist: subscript (',' subscript)* [',']
 // subscript: test | [test] ':' [test] [sliceop]
