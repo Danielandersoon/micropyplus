@@ -41,6 +41,23 @@ static mp_obj_t py_gc_collect(void) {
 }
 MP_DEFINE_CONST_FUN_OBJ_0(gc_collect_obj, py_gc_collect);
 
+static mp_obj_t py_gc_pin(mp_obj_t obj) {
+    gc_pin(MP_OBJ_TO_PTR(obj));
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gc_pin_obj, py_gc_pin);
+
+static mp_obj_t py_gc_unpin(mp_obj_t obj) {
+    gc_unpin(MP_OBJ_TO_PTR(obj));
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gc_unpin_obj, py_gc_unpin);
+
+static mp_obj_t py_gc_is_pinned(mp_obj_t obj) {
+    return mp_obj_new_bool(gc_is_pinned(MP_OBJ_TO_PTR(obj)));
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gc_is_pinned_obj, py_gc_is_pinned);
+
 // disable(): disable the garbage collector
 static mp_obj_t gc_disable(void) {
     MP_STATE_MEM(gc_auto_collect_enabled) = 0;
@@ -81,6 +98,12 @@ static mp_obj_t gc_mem_alloc(void) {
 }
 MP_DEFINE_CONST_FUN_OBJ_0(gc_mem_alloc_obj, gc_mem_alloc);
 
+// obj_header_size(): return the size of MicroPython object headers  
+static mp_obj_t gc_obj_header_size(void) {
+    return MP_OBJ_NEW_SMALL_INT(sizeof(mp_obj_base_t));
+}
+MP_DEFINE_CONST_FUN_OBJ_0(gc_obj_header_size_obj, gc_obj_header_size);
+
 #if MICROPY_GC_ALLOC_THRESHOLD
 static mp_obj_t gc_threshold(size_t n_args, const mp_obj_t *args) {
     if (n_args == 0) {
@@ -108,6 +131,10 @@ static const mp_rom_map_elem_t mp_module_gc_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_isenabled), MP_ROM_PTR(&gc_isenabled_obj) },
     { MP_ROM_QSTR(MP_QSTR_mem_free), MP_ROM_PTR(&gc_mem_free_obj) },
     { MP_ROM_QSTR(MP_QSTR_mem_alloc), MP_ROM_PTR(&gc_mem_alloc_obj) },
+    { MP_ROM_QSTR(MP_QSTR_pin), MP_ROM_PTR(&gc_pin_obj) },
+    { MP_ROM_QSTR(MP_QSTR_unpin), MP_ROM_PTR(&gc_unpin_obj) },
+    { MP_ROM_QSTR(MP_QSTR_is_pinned), MP_ROM_PTR(&gc_is_pinned_obj) },
+    { MP_ROM_QSTR(MP_QSTR_obj_header_size), MP_ROM_PTR(&gc_obj_header_size_obj) },
     #if MICROPY_GC_ALLOC_THRESHOLD
     { MP_ROM_QSTR(MP_QSTR_threshold), MP_ROM_PTR(&gc_threshold_obj) },
     #endif
