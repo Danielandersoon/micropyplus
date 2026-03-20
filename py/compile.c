@@ -2305,19 +2305,20 @@ static void compile_ptr_deref(compiler_t *comp, mp_parse_node_struct_t *pns) {
     // Check if operand is a simple NAME node
     if (MP_PARSE_NODE_IS_ID(operand)) {
         qstr qst = MP_PARSE_NODE_LEAF_ARG(operand);
-        mp_emit_common_find_or_add_id(comp->emit_common, qst, NULL);
+        id_info_t *id_info = scope_find_or_add_id(comp->scope_cur, qst, ID_INFO_KIND_UNDECIDED);
         
-        // Look up variable scope
-        id_info_t *id = scope_find_or_add_id(comp->scope, qst, ID_INFO_KIND_GLOBAL);
-        int kind = id->kind == ID_INFO_KIND_LOCAL ? MP_EMIT_IDOP_LOCAL_FAST : MP_EMIT_IDOP_GLOBAL_GLOBAL;
+        // Determine if local or global based on the id_info
+        int kind = (id_info->kind == ID_INFO_KIND_LOCAL || id_info->kind == ID_INFO_KIND_CELL) 
+                 ? MP_EMIT_IDOP_LOCAL_FAST 
+                 : MP_EMIT_IDOP_GLOBAL_GLOBAL;
         
-        EMIT_ARG(pointer_deref, id->local_num, kind);
+        EMIT_ARG(pointer_deref, id_info->local_num, kind);
     } else {
         // Dereference expression result on stack
         compile_node(comp, operand);
-        EMIT_ARG(pointer_deref, 0, MP_EMIT_IDOP_LOCAL_FAST);  // placeholder
-    }
-}
+        // Can't determine scope, use a stack-based deref (needs separate opcode)
+        EMIT_ARG(pointer_deref, 0, MP_EMIT_IDOP_LOCAL_FAST);
+    }}
 
 // Address-of operator: &obj
 // If obj is a variable name, take address by index/qstr; otherwise address expression on stack
@@ -2327,17 +2328,18 @@ static void compile_ptr_addr_of(compiler_t *comp, mp_parse_node_struct_t *pns) {
     // Check if operand is a simple NAME node
     if (MP_PARSE_NODE_IS_ID(operand)) {
         qstr qst = MP_PARSE_NODE_LEAF_ARG(operand);
-        mp_emit_common_find_or_add_id(comp->emit_common, qst, NULL);
+        id_info_t *id_info = scope_find_or_add_id(comp->scope_cur, qst, ID_INFO_KIND_UNDECIDED);
         
-        // Look up variable scope
-        id_info_t *id = scope_find_or_add_id(comp->scope, qst, ID_INFO_KIND_GLOBAL);
-        int kind = id->kind == ID_INFO_KIND_LOCAL ? MP_EMIT_IDOP_LOCAL_FAST : MP_EMIT_IDOP_GLOBAL_GLOBAL;
+        // Determine if local or global based on the id_info
+        int kind = (id_info->kind == ID_INFO_KIND_LOCAL || id_info->kind == ID_INFO_KIND_CELL) 
+                 ? MP_EMIT_IDOP_LOCAL_FAST 
+                 : MP_EMIT_IDOP_GLOBAL_GLOBAL;
         
-        EMIT_ARG(address_of, id->local_num, kind);
+        EMIT_ARG(address_of, id_info->local_num, kind);
     } else {
         // Take address of expression result on stack
         compile_node(comp, operand);
-        EMIT_ARG(address_of, 0, MP_EMIT_IDOP_LOCAL_FAST);  // placeholder
+        EMIT_ARG(address_of, 0, MP_EMIT_IDOP_LOCAL_FAST);
     }
 }
 

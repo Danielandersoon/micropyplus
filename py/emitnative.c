@@ -2661,13 +2661,17 @@ static void emit_native_binary_op(emit_t *emit, mp_binary_op_t op) {
 }
 
 // Pointer dereference operation (placeholder)
-static void emit_native_pointer_deref(emit_t *emit) {
+static void emit_native_pointer_deref(emit_t *emit, mp_uint_t local_num_or_qstr, int kind) {
     (void)emit;
+    (void)local_num_or_qstr;
+    (void)kind;
 }
 
 // Address-of operation (placeholder)
-static void emit_native_address_of(emit_t *emit) {
+static void emit_native_address_of(emit_t *emit, mp_uint_t local_num_or_qstr, int kind) {
     (void)emit;
+    (void)local_num_or_qstr;
+    (void)kind;
 }
 
 // Pointer member access operation (placeholder)
