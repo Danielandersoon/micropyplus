@@ -168,6 +168,7 @@ PY_CORE_O_BASENAME = $(addprefix py/,\
 	objmodule.o \
 	objobject.o \
 	objpolyiter.o \
+	objpointer.o \
 	objproperty.o \
 	objnone.o \
 	objnamedtuple.o \
