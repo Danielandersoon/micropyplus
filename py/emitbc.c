@@ -729,14 +729,22 @@ void mp_emit_bc_binary_op(emit_t *emit, mp_binary_op_t op) {
     }
 }
 
-// Pointer dereference operation
-void mp_emit_bc_pointer_deref(emit_t *emit) {
-    emit_write_bytecode_byte(emit, 0, MP_BC_POINTER_DEREF);
+// Pointer dereference operation (local or global)
+void mp_emit_bc_pointer_deref(emit_t *emit, mp_uint_t local_num_or_qstr, int kind) {
+    if (kind == MP_EMIT_IDOP_LOCAL_FAST) {
+        emit_write_bytecode_byte_uint(emit, 0, MP_BC_POINTER_DEREF_FAST, local_num_or_qstr);
+    } else {
+        emit_write_bytecode_byte_qstr(emit, 0, MP_BC_POINTER_DEREF_GLOBAL, (qstr)local_num_or_qstr);
+    }
 }
 
-// Address-of operation
-void mp_emit_bc_address_of(emit_t *emit) {
-    emit_write_bytecode_byte(emit, 1, MP_BC_ADDRESS_OF);
+// Address-of operation (local or global)
+void mp_emit_bc_address_of(emit_t *emit, mp_uint_t local_num_or_qstr, int kind) {
+    if (kind == MP_EMIT_IDOP_LOCAL_FAST) {
+        emit_write_bytecode_byte_uint(emit, 1, MP_BC_ADDRESS_OF_FAST, local_num_or_qstr);
+    } else {
+        emit_write_bytecode_byte_qstr(emit, 1, MP_BC_ADDRESS_OF_GLOBAL, (qstr)local_num_or_qstr);
+    }
 }
 
 // Pointer member access operation

@@ -107,9 +107,11 @@
 #define MP_BC_DELETE_NAME                   (MP_BC_BASE_QSTR_O + 0x09) // qstr
 #define MP_BC_DELETE_GLOBAL                 (MP_BC_BASE_QSTR_O + 0x0a) // qstr
 
-#define MP_BC_POINTER_DEREF                 (MP_BC_BASE_BYTE_O + 0x0b)
-#define MP_BC_ADDRESS_OF                    (MP_BC_BASE_BYTE_O + 0x0c)
-#define MP_BC_POINTER_MEMBER_ACCESS         (MP_BC_BASE_QSTR_O + 0x0d) // qstr
+#define MP_BC_ADDRESS_OF_FAST               (MP_BC_BASE_VINT_O + 0x08) // uint - local variable index
+#define MP_BC_ADDRESS_OF_GLOBAL             (MP_BC_BASE_QSTR_O + 0x0d) // qstr - global variable name
+#define MP_BC_POINTER_DEREF_FAST            (MP_BC_BASE_VINT_O + 0x09) // uint - local variable index
+#define MP_BC_POINTER_DEREF_GLOBAL          (MP_BC_BASE_QSTR_O + 0x0e) // qstr - global variable name
+#define MP_BC_POINTER_MEMBER_ACCESS         (MP_BC_BASE_QSTR_O + 0x0f) // qstr - member name
 
 #define MP_BC_DUP_TOP                       (MP_BC_BASE_BYTE_O + 0x07)
 #define MP_BC_DUP_TOP_TWO                   (MP_BC_BASE_BYTE_O + 0x08)
