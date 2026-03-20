@@ -729,20 +729,19 @@ void mp_emit_bc_binary_op(emit_t *emit, mp_binary_op_t op) {
     }
 }
 
-// Pointer dereference operation - placeholder
+// Pointer dereference operation
 void mp_emit_bc_pointer_deref(emit_t *emit) {
-    emit_write_bytecode_byte(emit, -1, 255);  // Placeholder bytecode
+    emit_write_bytecode_byte(emit, 0, MP_BC_POINTER_DEREF);
 }
 
-// Address-of operation - placeholder
+// Address-of operation
 void mp_emit_bc_address_of(emit_t *emit) {
-    emit_write_bytecode_byte(emit, 0, 254);  // Placeholder bytecode
+    emit_write_bytecode_byte(emit, 1, MP_BC_ADDRESS_OF);
 }
 
-// Pointer member access operation - placeholder
+// Pointer member access operation
 void mp_emit_bc_pointer_member_access(emit_t *emit, qstr member) {
-    emit_write_bytecode_byte(emit, -1, 253);  // Placeholder bytecode
-    emit_write_bytecode_byte(emit, 0, member);  // Member name as index
+    emit_write_bytecode_byte_qstr(emit, 0, MP_BC_POINTER_MEMBER_ACCESS, member);
 }
 
 void mp_emit_bc_build(emit_t *emit, mp_uint_t n_args, int kind) {
