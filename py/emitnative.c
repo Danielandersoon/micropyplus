@@ -2660,17 +2660,33 @@ static void emit_native_binary_op(emit_t *emit, mp_binary_op_t op) {
     }
 }
 
-// Pointer dereference operation (placeholder)
-static void emit_native_pointer_deref(emit_t *emit, mp_uint_t local_num_or_qstr, int kind) {
+// Address-of local variable (stub)
+static void emit_native_address_of_local(emit_t *emit, qstr qst, mp_uint_t local_num, int kind) {
     (void)emit;
-    (void)local_num_or_qstr;
+    (void)qst;
+    (void)local_num;
     (void)kind;
 }
 
-// Address-of operation (placeholder)
-static void emit_native_address_of(emit_t *emit, mp_uint_t local_num_or_qstr, int kind) {
+// Address-of global variable (stub)
+static void emit_native_address_of_global(emit_t *emit, qstr qst, int kind) {
     (void)emit;
-    (void)local_num_or_qstr;
+    (void)qst;
+    (void)kind;
+}
+
+// Pointer dereference of local variable (stub)
+static void emit_native_pointer_deref_local(emit_t *emit, qstr qst, mp_uint_t local_num, int kind) {
+    (void)emit;
+    (void)qst;
+    (void)local_num;
+    (void)kind;
+}
+
+// Pointer dereference of global variable (stub)
+static void emit_native_pointer_deref_global(emit_t *emit, qstr qst, int kind) {
+    (void)emit;
+    (void)qst;
     (void)kind;
 }
 
@@ -3089,6 +3105,14 @@ const emit_method_table_t EXPORT_FUN(method_table) = {
         emit_native_delete_local,
         emit_native_delete_global,
     },
+    {
+        emit_native_address_of_local,
+        emit_native_address_of_global,
+    },
+    {
+        emit_native_pointer_deref_local,
+        emit_native_pointer_deref_global,
+    },
 
     emit_native_label_assign,
     emit_native_import,
@@ -3122,8 +3146,6 @@ const emit_method_table_t EXPORT_FUN(method_table) = {
     emit_native_pop_except_jump,
     emit_native_unary_op,
     emit_native_binary_op,
-    emit_native_pointer_deref,
-    emit_native_address_of,
     emit_native_pointer_member_access,
     emit_native_build,
     emit_native_store_map,

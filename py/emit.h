@@ -121,6 +121,8 @@ typedef struct _emit_method_table_t {
     mp_emit_method_table_id_ops_t load_id;
     mp_emit_method_table_id_ops_t store_id;
     mp_emit_method_table_id_ops_t delete_id;
+    mp_emit_method_table_id_ops_t address_of;
+    mp_emit_method_table_id_ops_t pointer_deref;
 
     void (*label_assign)(emit_t *emit, mp_uint_t l);
     void (*import)(emit_t *emit, qstr qst, int kind);
@@ -154,8 +156,6 @@ typedef struct _emit_method_table_t {
     void (*pop_except_jump)(emit_t *emit, mp_uint_t label, bool within_exc_handler);
     void (*unary_op)(emit_t *emit, mp_unary_op_t op);
     void (*binary_op)(emit_t *emit, mp_binary_op_t op);
-    void (*pointer_deref)(emit_t *emit, mp_uint_t local_num_or_qstr, int kind);
-    void (*address_of)(emit_t *emit, mp_uint_t local_num_or_qstr, int kind);
     void (*pointer_member_access)(emit_t *emit, qstr member);
     void (*build)(emit_t *emit, mp_uint_t n_args, int kind);
     void (*store_map)(emit_t *emit);
@@ -213,6 +213,9 @@ extern const emit_method_table_t emit_native_debug_method_table;
 extern const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_load_id_ops;
 extern const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_store_id_ops;
 extern const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_delete_id_ops;
+extern const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_address_of_ops;
+extern const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_pointer_deref_ops;
+
 
 emit_t *emit_bc_new(mp_emit_common_t *emit_common);
 emit_t *emit_native_x64_new(mp_emit_common_t *emit_common, mp_obj_t *error_slot, uint *label_slot, mp_uint_t max_num_labels);

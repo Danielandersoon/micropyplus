@@ -538,6 +538,51 @@ dispatch_loop:
                     DISPATCH();
                 }
 
+                ENTRY(MP_BC_ADDRESS_OF_FAST): {
+                    DECODE_UINT;
+                    mp_obj_t *ptr = &fastn[-unum];
+                    PUSH(mp_obj_new_pointer(ptr));
+                    DISPATCH();
+                }
+
+                ENTRY(MP_BC_ADDRESS_OF_GLOBAL): {
+                    MARK_EXC_IP_SELECTIVE();
+                    DECODE_QSTR;
+                    mp_map_elem_t *elem = mp_map_lookup(&mp_globals_get()->map, MP_OBJ_NEW_QSTR(qst), MP_MAP_LOOKUP);
+                    if (elem == NULL) {
+                        // Could also check builtins here if we want to support pointers to builtins
+                        goto local_name_error;
+                    }
+                    PUSH(mp_obj_new_pointer(&elem->value));
+                    DISPATCH();
+                }
+
+                ENTRY(MP_BC_POINTER_DEREF_FAST): {
+                    DECODE_UINT;
+                    mp_obj_t ptr_obj = fastn[-unum];
+                    mp_obj_t *ptr = (mp_obj_t *)mp_obj_pointer_get(ptr_obj);
+                    PUSH(*ptr);
+                    DISPATCH();
+                }
+
+                ENTRY(MP_BC_POINTER_DEREF_GLOBAL): {
+                    MARK_EXC_IP_SELECTIVE();
+                    DECODE_QSTR;
+                    mp_obj_t ptr_obj = mp_load_global(qst);
+                    mp_obj_t *ptr = (mp_obj_t *)mp_obj_pointer_get(ptr_obj);
+                    PUSH(*ptr);
+                    DISPATCH();
+                }
+
+                ENTRY(MP_BC_POINTER_MEMBER_ACCESS): {
+                    MARK_EXC_IP_SELECTIVE();
+                    DECODE_QSTR;
+                    mp_obj_t ptr_obj = TOP();
+                    mp_obj_t *ptr = (mp_obj_t *)mp_obj_pointer_get(ptr_obj);
+                    SET_TOP(mp_load_attr(*ptr, qst));
+                    DISPATCH();
+                }
+
                 ENTRY(MP_BC_DUP_TOP): {
                     mp_obj_t top = TOP();
                     PUSH(top);

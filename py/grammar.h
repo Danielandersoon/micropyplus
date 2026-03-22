@@ -278,7 +278,6 @@ DEF_RULE_NC(atom_expr_trailers, one_or_more, rule(trailer))
 DEF_RULE_NC(power_dbl_star, and_ident(2), tok(OP_DBL_STAR), rule(factor))
 
 // Pointer-specific rules
-// ptr_unary_op: '*' factor | '&' factor
 // ptr_member_access: '->' NAME
 // ptr_type_annotation: '*' [ptr_type_annotation] | NAME
 

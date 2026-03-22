@@ -38,6 +38,7 @@
 #include "py/nativeglue.h"
 #include "py/persistentcode.h"
 #include "py/smallint.h"
+#include "py/mpprint.h"
 
 #if MICROPY_ENABLE_COMPILER
 
@@ -2257,8 +2258,54 @@ static void compile_comparison(compiler_t *comp, mp_parse_node_struct_t *pns) {
     }
 }
 
+// Lookup function: unwraps parse nodes to get to the underlying identifier or value
+static mp_parse_node_t get_operand_node(mp_parse_node_t pn) {
+    while (MP_PARSE_NODE_IS_STRUCT(pn)) {
+        mp_parse_node_struct_t *pns = (mp_parse_node_struct_t *)pn;
+        int kind = MP_PARSE_NODE_STRUCT_KIND(pns);
+        if (kind == PN_power) {
+            if (MP_PARSE_NODE_IS_NULL(pns->nodes[1])) {
+                pn = pns->nodes[0];
+                continue;
+            }
+        } else if (kind == PN_atom_expr_normal) {
+            if (MP_PARSE_NODE_IS_NULL(pns->nodes[1])) {
+                pn = pns->nodes[0];
+                continue;
+            }
+        }
+        break;
+    }
+    return pn;
+}
+
 static void compile_star_expr(compiler_t *comp, mp_parse_node_struct_t *pns) {
-    compile_syntax_error(comp, (mp_parse_node_t)pns, MP_ERROR_TEXT("*x must be assignment target"));
+    // star_expr: '*' expr
+    // Check if this is pointer dereference or unpacking
+    
+    mp_parse_node_t pn_operand = pns->nodes[0];
+    
+    // Try to get the simple identifier if it exists
+    mp_parse_node_t pn_simple = get_operand_node(pn_operand);
+    
+    if (MP_PARSE_NODE_IS_ID(pn_simple)) {
+        // This is likely pointer dereference: *identifier
+        qstr qst = MP_PARSE_NODE_LEAF_ARG(pn_simple);
+        
+        // Use the existing POINTER_DEREF_FAST or POINTER_DEREF_GLOBAL based on scope
+        if (comp->pass == MP_PASS_SCOPE) {
+            mp_emit_common_get_id_for_load(comp->scope_cur, qst);
+        } else {
+            #if NEED_METHOD_TABLE
+            mp_emit_common_id_op(comp->emit, &comp->emit_method_table->pointer_deref, comp->scope_cur, qst);
+            #else
+            mp_emit_common_id_op(comp->emit, &mp_emit_bc_method_table_pointer_deref_ops, comp->scope_cur, qst);
+            #endif
+        }
+    } else {
+        // This is unpacking: compile the operand
+        compile_node(comp, pn_operand);
+    }
 }
 
 static void compile_binary_op(compiler_t *comp, mp_parse_node_struct_t *pns) {
@@ -2298,48 +2345,58 @@ static void compile_factor_2(compiler_t *comp, mp_parse_node_struct_t *pns) {
 }
 
 // Pointer dereference: *ptr
-// If ptr is a variable name, dereference by index/qstr; otherwise dereference expression on stack
+// Only handles simple identifiers (variables containing pointer objects)
 static void compile_ptr_deref(compiler_t *comp, mp_parse_node_struct_t *pns) {
-    mp_parse_node_t operand = pns->nodes[1];
+    // ptr_deref: '*' factor
+    // pns->nodes[0] is the factor
     
-    // Check if operand is a simple NAME node
-    if (MP_PARSE_NODE_IS_ID(operand)) {
-        qstr qst = MP_PARSE_NODE_LEAF_ARG(operand);
-        id_info_t *id_info = scope_find_or_add_id(comp->scope_cur, qst, ID_INFO_KIND_UNDECIDED);
+    mp_parse_node_t pn_operand = get_operand_node(pns->nodes[0]);
+    
+    if (MP_PARSE_NODE_IS_ID(pn_operand)) {
+        qstr qst = MP_PARSE_NODE_LEAF_ARG(pn_operand);
         
-        // Determine if local or global based on the id_info
-        int kind = (id_info->kind == ID_INFO_KIND_LOCAL || id_info->kind == ID_INFO_KIND_CELL) 
-                 ? MP_EMIT_IDOP_LOCAL_FAST 
-                 : MP_EMIT_IDOP_GLOBAL_GLOBAL;
-        
-        EMIT_ARG(pointer_deref, id_info->local_num, kind);
+        // Use the existing POINTER_DEREF_FAST or POINTER_DEREF_GLOBAL based on scope
+        if (comp->pass == MP_PASS_SCOPE) {
+            mp_emit_common_get_id_for_load(comp->scope_cur, qst);
+        } else {
+            #if NEED_METHOD_TABLE
+            mp_emit_common_id_op(comp->emit, &comp->emit_method_table->pointer_deref, comp->scope_cur, qst);
+            #else
+            mp_emit_common_id_op(comp->emit, &mp_emit_bc_method_table_pointer_deref_ops, comp->scope_cur, qst);
+            #endif
+        }
     } else {
-        // Dereference expression result on stack
-        compile_node(comp, operand);
-        // Can't determine scope, use a stack-based deref (needs separate opcode)
-        EMIT_ARG(pointer_deref, 0, MP_EMIT_IDOP_LOCAL_FAST);
-    }}
+        // For complex expressions, just compile the operand without dereferencing
+        compile_node(comp, pns->nodes[0]);
+    }
+}
 
 // Address-of operator: &obj
-// If obj is a variable name, take address by index/qstr; otherwise address expression on stack
 static void compile_ptr_addr_of(compiler_t *comp, mp_parse_node_struct_t *pns) {
-    mp_parse_node_t operand = pns->nodes[1];
+    // pns->nodes[0] is the OP_AMPERSAND token
+    // pns->nodes[1] is the factor rule result
     
-    // Check if operand is a simple NAME node
-    if (MP_PARSE_NODE_IS_ID(operand)) {
-        qstr qst = MP_PARSE_NODE_LEAF_ARG(operand);
-        id_info_t *id_info = scope_find_or_add_id(comp->scope_cur, qst, ID_INFO_KIND_UNDECIDED);
-        
-        // Determine if local or global based on the id_info
-        int kind = (id_info->kind == ID_INFO_KIND_LOCAL || id_info->kind == ID_INFO_KIND_CELL) 
-                 ? MP_EMIT_IDOP_LOCAL_FAST 
-                 : MP_EMIT_IDOP_GLOBAL_GLOBAL;
-        
-        EMIT_ARG(address_of, id_info->local_num, kind);
+    mp_parse_node_t pn_operand_node;
+    if (MP_PARSE_NODE_STRUCT_NUM_NODES(pns) == 1) {
+        pn_operand_node = pns->nodes[0];
     } else {
-        // Take address of expression result on stack
-        compile_node(comp, operand);
-        EMIT_ARG(address_of, 0, MP_EMIT_IDOP_LOCAL_FAST);
+        pn_operand_node = pns->nodes[1];
+    }
+    mp_parse_node_t pn_operand = get_operand_node(pn_operand_node);
+
+    if (MP_PARSE_NODE_IS_ID(pn_operand)) {
+        qstr qst = MP_PARSE_NODE_LEAF_ARG(pn_operand);
+        if (comp->pass == MP_PASS_SCOPE) {
+            mp_emit_common_get_id_for_load(comp->scope_cur, qst);
+        } else {
+            #if NEED_METHOD_TABLE
+            mp_emit_common_id_op(comp->emit, &comp->emit_method_table->address_of, comp->scope_cur, qst);
+            #else
+            mp_emit_common_id_op(comp->emit, &mp_emit_bc_method_table_address_of_ops, comp->scope_cur, qst);
+            #endif
+        }
+    } else {
+        compile_syntax_error(comp, (mp_parse_node_t)pns, MP_ERROR_TEXT("can only take address of variable"));
     }
 }
 
@@ -2352,7 +2409,13 @@ static void compile_ptr_member_access(compiler_t *comp, mp_parse_node_struct_t *
 
 // Trailer for pointer member access
 static void compile_trailer_ptr_member(compiler_t *comp, mp_parse_node_struct_t *pns) {
-    qstr member = MP_PARSE_NODE_LEAF_ARG(pns->nodes[1]);
+    mp_parse_node_t pn_member;
+    if (MP_PARSE_NODE_STRUCT_NUM_NODES(pns) == 1) {
+        pn_member = pns->nodes[0];
+    } else {
+        pn_member = pns->nodes[1];
+    }
+    qstr member = MP_PARSE_NODE_LEAF_ARG(pn_member);
     EMIT_ARG(pointer_member_access, member);
 }
 
@@ -3533,6 +3596,17 @@ static void scope_compute_things(scope_t *scope) {
 static
 #endif
 void mp_compile_to_raw_code(mp_parse_tree_t *parse_tree, qstr source_file, bool is_repl, mp_compiled_module_t *cm) {
+    
+    //
+    //
+    // Remove on completion
+    //
+    //
+
+    // printf("AST:\n");
+    // mp_parse_node_print(&mp_plat_print, parse_tree->root, 0);
+    // printf("\n");
+
     // put compiler state on the stack, it's relatively small
     compiler_t comp_state = {0};
     compiler_t *comp = &comp_state;
