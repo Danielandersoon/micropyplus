@@ -107,11 +107,17 @@
 #define MP_BC_DELETE_NAME                   (MP_BC_BASE_QSTR_O + 0x09) // qstr
 #define MP_BC_DELETE_GLOBAL                 (MP_BC_BASE_QSTR_O + 0x0a) // qstr
 
+// Pointer Reference assignment and deref opcodes
 #define MP_BC_ADDRESS_OF_FAST               (MP_BC_BASE_VINT_O + 0x08) // uint - local variable index
 #define MP_BC_ADDRESS_OF_GLOBAL             (MP_BC_BASE_QSTR_O + 0x0d) // qstr - global variable name
 #define MP_BC_POINTER_DEREF_FAST            (MP_BC_BASE_VINT_O + 0x09) // uint - local variable index
 #define MP_BC_POINTER_DEREF_GLOBAL          (MP_BC_BASE_QSTR_O + 0x0e) // qstr - global variable name
 #define MP_BC_POINTER_MEMBER_ACCESS         (MP_BC_BASE_QSTR_O + 0x0f) // qstr - member name
+
+// Pointer assignment opcodes
+#define MP_BC_POINTER_ASSIGN_FAST           (MP_BC_BASE_VINT_E + 0x0a) // uint - local variable index, value on stack
+#define MP_BC_POINTER_ASSIGN_GLOBAL         (MP_BC_BASE_VINT_O + 0x0a) // qstr - global variable name, value on stack
+#define MP_BC_POINTER_MEMBER_ASSIGN         (MP_BC_BASE_VINT_O + 0x0b) // qstr - member name, value on stack
 
 #define MP_BC_DUP_TOP                       (MP_BC_BASE_BYTE_O + 0x07)
 #define MP_BC_DUP_TOP_TWO                   (MP_BC_BASE_BYTE_O + 0x08)

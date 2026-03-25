@@ -123,6 +123,7 @@ typedef struct _emit_method_table_t {
     mp_emit_method_table_id_ops_t delete_id;
     mp_emit_method_table_id_ops_t address_of;
     mp_emit_method_table_id_ops_t pointer_deref;
+    mp_emit_method_table_id_ops_t pointer_assign;
 
     void (*label_assign)(emit_t *emit, mp_uint_t l);
     void (*import)(emit_t *emit, qstr qst, int kind);
@@ -215,6 +216,8 @@ extern const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_store_id_ops;
 extern const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_delete_id_ops;
 extern const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_address_of_ops;
 extern const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_pointer_deref_ops;
+extern const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_pointer_assign_ops;
+
 
 
 emit_t *emit_bc_new(mp_emit_common_t *emit_common);
@@ -284,8 +287,13 @@ void mp_emit_bc_pop_except_jump(emit_t *emit, mp_uint_t label, bool within_exc_h
 void mp_emit_bc_unary_op(emit_t *emit, mp_unary_op_t op);
 void mp_emit_bc_binary_op(emit_t *emit, mp_binary_op_t op);
 void mp_emit_bc_pointer_deref(emit_t *emit, mp_uint_t local_num_or_qstr, int kind);
+void mp_emit_bc_pointer_deref_local(emit_t *emit, qstr qst, mp_uint_t local_num, int kind);
+void mp_emit_bc_pointer_deref_global(emit_t *emit, qstr qst, int kind);
 void mp_emit_bc_address_of(emit_t *emit, mp_uint_t local_num_or_qstr, int kind);
+void mp_emit_bc_pointer_assign_local(emit_t *emit, qstr qst, mp_uint_t local_num, int kind);
+void mp_emit_bc_pointer_assign_global(emit_t *emit, qstr qst, int kind);
 void mp_emit_bc_pointer_member_access(emit_t *emit, qstr member);
+void mp_emit_bc_pointer_member_assign(emit_t *emit, qstr member);
 void mp_emit_bc_build(emit_t *emit, mp_uint_t n_args, int kind);
 void mp_emit_bc_store_map(emit_t *emit);
 void mp_emit_bc_store_comp(emit_t *emit, scope_kind_t kind, mp_uint_t list_stack_index);

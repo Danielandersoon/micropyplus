@@ -119,9 +119,6 @@ typedef enum _mp_token_kind_t {
     MP_TOKEN_OP_PLUS,
     MP_TOKEN_OP_MINUS,
     MP_TOKEN_OP_STAR,
-    MP_TOKEN_OP_DEREF,      // * (pointer dereference)
-    MP_TOKEN_OP_ADDR_OF,    // & (address-of)
-    MP_TOKEN_OP_PTR_MEMBER, // -> (pointer member access)
     MP_TOKEN_OP_AT,
     MP_TOKEN_OP_DBL_SLASH,
     MP_TOKEN_OP_SLASH,
@@ -142,6 +139,11 @@ typedef enum _mp_token_kind_t {
     MP_TOKEN_DEL_SLASH_EQUAL,
     MP_TOKEN_DEL_PERCENT_EQUAL,
     MP_TOKEN_DEL_DBL_STAR_EQUAL,
+
+    // Pointer-specific operators (not part of the 13-element offset calculation)
+    MP_TOKEN_OP_DEREF,      // * (pointer dereference)
+    MP_TOKEN_OP_ADDR_OF,    // & (address-of)
+    MP_TOKEN_OP_PTR_MEMBER, // -> (pointer member access)
 
     MP_TOKEN_DEL_PAREN_OPEN,
     MP_TOKEN_DEL_PAREN_CLOSE,

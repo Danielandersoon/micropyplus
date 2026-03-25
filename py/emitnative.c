@@ -2690,6 +2690,21 @@ static void emit_native_pointer_deref_global(emit_t *emit, qstr qst, int kind) {
     (void)kind;
 }
 
+// Pointer assignment to local variable (stub)
+static void emit_native_pointer_assign_local(emit_t *emit, qstr qst, mp_uint_t local_num, int kind) {
+    (void)emit;
+    (void)qst;
+    (void)local_num;
+    (void)kind;
+}
+
+// Pointer assignment to global variable (stub)
+static void emit_native_pointer_assign_global(emit_t *emit, qstr qst, int kind) {
+    (void)emit;
+    (void)qst;
+    (void)kind;
+}
+
 // Pointer member access operation (placeholder)
 static void emit_native_pointer_member_access(emit_t *emit, qstr member) {
     (void)emit;
@@ -3112,6 +3127,10 @@ const emit_method_table_t EXPORT_FUN(method_table) = {
     {
         emit_native_pointer_deref_local,
         emit_native_pointer_deref_global,
+    },
+    {
+        emit_native_pointer_assign_local,
+        emit_native_pointer_assign_global,
     },
 
     emit_native_label_assign,

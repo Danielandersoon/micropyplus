@@ -446,6 +446,7 @@ static void c_if_cond(compiler_t *comp, mp_parse_node_t pn, bool jump_if, int la
 }
 
 typedef enum { ASSIGN_STORE, ASSIGN_AUG_LOAD, ASSIGN_AUG_STORE } assign_kind_t;
+static mp_parse_node_t get_operand_node(mp_parse_node_t pn);
 static void c_assign(compiler_t *comp, mp_parse_node_t pn, assign_kind_t kind);
 
 static void c_assign_atom_expr(compiler_t *comp, mp_parse_node_struct_t *pns, assign_kind_t assign_kind) {
@@ -489,6 +490,23 @@ static void c_assign_atom_expr(compiler_t *comp, mp_parse_node_struct_t *pns, as
                     EMIT(rot_two);
                 }
                 EMIT_ARG(attr, MP_PARSE_NODE_LEAF_ARG(pns1->nodes[0]), MP_EMIT_ATTR_STORE);
+            }
+            return;
+        } else if (MP_PARSE_NODE_STRUCT_KIND(pns1) == PN_trailer_ptr_member) {
+            // Pointer member assignment: ptr->member = value
+            assert(MP_PARSE_NODE_IS_ID(pns1->nodes[1]));
+            qstr member = MP_PARSE_NODE_LEAF_ARG(pns1->nodes[1]);
+            if (assign_kind == ASSIGN_AUG_LOAD) {
+                // For augmented assignment load dup the pointer and load member
+                EMIT(dup_top);
+                EMIT_ARG(pointer_member_access, member);
+            } else {
+                if (assign_kind == ASSIGN_AUG_STORE) {
+                    // For augmented assignment store rotate stack 
+                    EMIT(rot_two);
+                }
+                // Store the member through the pointer - emit directly
+                mp_emit_bc_pointer_member_assign(comp->emit, member);
             }
             return;
         }
@@ -591,6 +609,126 @@ static void c_assign(compiler_t *comp, mp_parse_node_t pn, assign_kind_t assign_
                     c_assign_tuple(comp, 1, pns->nodes);
                 }
                 break;
+
+            case PN_star_expr:
+                // Could be pointer dereference (*ptr = value) or unpacking in tuple context
+                // Check if this is a simple pointer dereference or unpacking
+                {
+                    mp_parse_node_t pn_ptr = pns->nodes[0];
+                    mp_parse_node_t pn_simple_ptr = get_operand_node(pn_ptr);
+                    
+                    if (MP_PARSE_NODE_IS_ID(pn_simple_ptr)) {
+                        // This looks like pointer dereference: *ptr = value
+                        qstr qst = MP_PARSE_NODE_LEAF_ARG(pn_simple_ptr);
+                        
+                        if (assign_kind == ASSIGN_AUG_LOAD) {
+                            // For augmented load like (*ptr) += value
+                            compile_load_id(comp, qst);
+                            EMIT(dup_top);
+                            if (comp->pass != MP_PASS_SCOPE) {
+                                id_info_t *id_info = scope_find(comp->scope_cur, qst);
+                                if (id_info != NULL && (id_info->kind == ID_INFO_KIND_LOCAL || id_info->kind == ID_INFO_KIND_CELL)) {
+                                    mp_emit_bc_pointer_deref_local(comp->emit, qst, id_info->local_num, 0);
+                                } else {
+                                    mp_emit_bc_pointer_deref_global(comp->emit, qst, 0);
+                                }
+                            }
+                        } else if (assign_kind == ASSIGN_AUG_STORE) {
+                            // For augmented store, rotate stack and assign
+                            EMIT(rot_three);
+                            if (comp->pass != MP_PASS_SCOPE) {
+                                id_info_t *id_info = scope_find(comp->scope_cur, qst);
+                                if (id_info != NULL && (id_info->kind == ID_INFO_KIND_LOCAL || id_info->kind == ID_INFO_KIND_CELL)) {
+                                    mp_emit_bc_pointer_assign_local(comp->emit, qst, id_info->local_num, 0);
+                                } else {
+                                    mp_emit_bc_pointer_assign_global(comp->emit, qst, 0);
+                                }
+                            }
+                        } else {
+                            // ASSIGN_STORE: simple assignment *ptr = value
+                            if (comp->pass == MP_PASS_SCOPE) {
+                                // During scope pass, register that we're loading this variable
+                                mp_emit_common_get_id_for_load(comp->scope_cur, qst);
+                            } else {
+                                // During code generation, emit the assignment
+                                id_info_t *id_info = scope_find(comp->scope_cur, qst);
+                                if (id_info != NULL && (id_info->kind == ID_INFO_KIND_LOCAL || id_info->kind == ID_INFO_KIND_CELL)) {
+                                    mp_emit_bc_pointer_assign_local(comp->emit, qst, id_info->local_num, 0);
+                                } else {
+                                    mp_emit_bc_pointer_assign_global(comp->emit, qst, 0);
+                                }
+                            }
+                        }
+                        break;
+                    } else {
+                        // Not a simple pointer, fall through to cannot_assign
+                        goto cannot_assign;
+                    }
+                }
+                break;
+
+            case PN_ptr_deref:
+                // Pointer dereference assignment: *ptr = value
+                // ptr_deref structure: and(2) with tok(OP_STAR), rule(factor)
+                // Tokens might or might not be stored in the nodes
+                {
+                    fprintf(stderr, "DEBUG: Compiling PN_ptr_deref assignment, assign_kind=%d\n", assign_kind);
+                    mp_parse_node_t pn_operand_node;
+                    if (MP_PARSE_NODE_STRUCT_NUM_NODES(pns) == 1) {
+                        pn_operand_node = pns->nodes[0];
+                    } else {
+                        pn_operand_node = pns->nodes[1];
+                    }
+                    mp_parse_node_t pn_operand = get_operand_node(pn_operand_node);
+                    
+                    if (!MP_PARSE_NODE_IS_ID(pn_operand)) {
+                        compile_syntax_error(comp, pn_operand_node, MP_ERROR_TEXT("can't assign to complex pointer expression"));
+                        break;
+                    }
+                    
+                    qstr qst = MP_PARSE_NODE_LEAF_ARG(pn_operand);
+                    fprintf(stderr, "DEBUG: qst=%u\n", (unsigned)qst);
+                    
+                    if (assign_kind == ASSIGN_AUG_LOAD) {
+                        // For augmented load like (*ptr) += value
+                        compile_load_id(comp, qst);
+                        EMIT(dup_top);
+                        if (comp->pass != MP_PASS_SCOPE) {
+                            #if NEED_METHOD_TABLE
+                            mp_emit_common_id_op(comp->emit, &comp->emit_method_table->pointer_deref, comp->scope_cur, qst);
+                            #else
+                            mp_emit_common_id_op(comp->emit, &mp_emit_bc_method_table_pointer_deref_ops, comp->scope_cur, qst);
+                            #endif
+                        }
+                    } else if (assign_kind == ASSIGN_AUG_STORE) {
+                        // For augmented store like (*ptr) += value
+                        EMIT(rot_three);
+                        if (comp->pass != MP_PASS_SCOPE) {
+                            #if NEED_METHOD_TABLE
+                            mp_emit_common_id_op(comp->emit, &comp->emit_method_table->pointer_assign, comp->scope_cur, qst);
+                            #else
+                            mp_emit_common_id_op(comp->emit, &mp_emit_bc_method_table_pointer_assign_ops, comp->scope_cur, qst);
+                            #endif
+                        }
+                    } else {
+                        // ASSIGN_STORE: simple assignment *ptr = value
+                        fprintf(stderr, "DEBUG: ASSIGN_STORE, pass=%d\n", comp->pass);
+                        if (comp->pass == MP_PASS_SCOPE) {
+                            // During scope pass, register that we're loading this variable
+                            fprintf(stderr, "DEBUG: SCOPE pass, calling get_id_for_load\n");
+                            mp_emit_common_get_id_for_load(comp->scope_cur, qst);
+                        } else {
+                            // During code generation, use method table to emit assignment
+                            fprintf(stderr, "DEBUG: CODE pass, calling id_op\n");
+                            #if NEED_METHOD_TABLE
+                            mp_emit_common_id_op(comp->emit, &comp->emit_method_table->pointer_assign, comp->scope_cur, qst);
+                            #else
+                            mp_emit_common_id_op(comp->emit, &mp_emit_bc_method_table_pointer_assign_ops, comp->scope_cur, qst);
+                            #endif
+                        }
+                    }
+                    break;
+                }
 
             default:
                 goto cannot_assign;
@@ -3603,9 +3741,9 @@ void mp_compile_to_raw_code(mp_parse_tree_t *parse_tree, qstr source_file, bool 
     //
     //
 
-    // printf("AST:\n");
-    // mp_parse_node_print(&mp_plat_print, parse_tree->root, 0);
-    // printf("\n");
+    /*printf("AST:\n");
+    mp_parse_node_print(&mp_plat_print, parse_tree->root, 0);
+    printf("\n");*/
 
     // put compiler state on the stack, it's relatively small
     compiler_t comp_state = {0};

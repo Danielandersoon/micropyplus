@@ -583,6 +583,81 @@ dispatch_loop:
                     DISPATCH();
                 }
 
+                // MUTABLE POINTER ASSIGNMENT OPCODES
+                ENTRY(MP_BC_POINTER_ASSIGN_FAST): {
+                    MARK_EXC_IP_SELECTIVE();
+                    DECODE_UINT;
+                    // Get the pointer from local variable
+                    mp_obj_t ptr_obj = fastn[-unum];
+                    
+                    // Validate ptr status
+                    if (!MP_OBJ_IS_TYPE(ptr_obj, &mp_type_pointer)) {
+                        RAISE(mp_obj_new_exception_msg(&mp_type_TypeError, MP_ERROR_TEXT("expected pointer")));
+                    }
+                    
+                    // Get the actual/raw pointer
+                    mp_obj_t *ptr = (mp_obj_t *)mp_obj_pointer_get(ptr_obj);
+                    
+                    // Check if pointer is NULL or points to invalid location
+                    if (ptr == NULL || (uintptr_t)ptr < 0x1000 || (uintptr_t)ptr > 0x7fffffff0000ULL) {
+                        RAISE(mp_obj_new_exception_msg(&mp_type_ValueError, MP_ERROR_TEXT("invalid pointer value")));
+                    }
+                    
+                    // Get value from stack
+                    mp_obj_t value = POP();
+                    
+                    // Write through pointer
+                    *ptr = value;
+                    
+                    DISPATCH();
+                }
+
+                ENTRY(MP_BC_POINTER_ASSIGN_GLOBAL): {
+                    MARK_EXC_IP_SELECTIVE();
+                    DECODE_QSTR;
+                    // Load the pointer from global namespace
+                    mp_obj_t ptr_obj = mp_load_global(qst);
+                    
+                    // Validate ptr
+                    if (!MP_OBJ_IS_TYPE(ptr_obj, &mp_type_pointer)) {
+                        RAISE(mp_obj_new_exception_msg(&mp_type_TypeError, MP_ERROR_TEXT("expected pointer")));
+                    }
+                    
+                    // Get the actual pointer
+                    mp_obj_t *ptr = (mp_obj_t *)mp_obj_pointer_get(ptr_obj);
+                    
+                    // Get value from stack
+                    mp_obj_t value = POP();
+                    
+                    // Write through pointer
+                    *ptr = value;
+                    
+                    DISPATCH();
+                }
+
+                ENTRY(MP_BC_POINTER_MEMBER_ASSIGN): {
+                    MARK_EXC_IP_SELECTIVE();
+                    DECODE_QSTR;
+                    // Get value from top of stack
+                    mp_obj_t value = POP();
+                    
+                    // Get pointer from top of stack (now at top after popping value)
+                    mp_obj_t ptr_obj = POP();
+                    
+                    // Validate ptr status
+                    if (!MP_OBJ_IS_TYPE(ptr_obj, &mp_type_pointer)) {
+                        RAISE(mp_obj_new_exception_msg(&mp_type_TypeError, MP_ERROR_TEXT("expected pointer")));
+                    }
+                    
+                    // Get the actual pointer
+                    mp_obj_t *ptr = (mp_obj_t *)mp_obj_pointer_get(ptr_obj);
+                    
+                    // Store attribute on dereferenced object
+                    mp_store_attr(*ptr, qst, value);
+                    
+                    DISPATCH();
+                }
+
                 ENTRY(MP_BC_DUP_TOP): {
                     mp_obj_t top = TOP();
                     PUSH(top);

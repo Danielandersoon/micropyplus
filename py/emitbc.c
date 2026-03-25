@@ -746,13 +746,13 @@ const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_address_of_ops = {
 };
 
 // Pointer dereference of local variable
-static void mp_emit_bc_pointer_deref_local(emit_t *emit, qstr qst, mp_uint_t local_num, int kind) {
+void mp_emit_bc_pointer_deref_local(emit_t *emit, qstr qst, mp_uint_t local_num, int kind) {
     (void)qst;
     emit_write_bytecode_byte_uint(emit, 0, MP_BC_POINTER_DEREF_FAST, local_num);
 }
 
 // Pointer dereference of global variable
-static void mp_emit_bc_pointer_deref_global(emit_t *emit, qstr qst, int kind) {
+void mp_emit_bc_pointer_deref_global(emit_t *emit, qstr qst, int kind) {
     emit_write_bytecode_byte_qstr(emit, 0, MP_BC_POINTER_DEREF_GLOBAL, qst);
 }
 
@@ -761,9 +761,30 @@ const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_pointer_deref_ops = 
     .global = mp_emit_bc_pointer_deref_global,
 };
 
+// Pointer assignment to local variable
+void mp_emit_bc_pointer_assign_local(emit_t *emit, qstr qst, mp_uint_t local_num, int kind) {
+    (void)qst;
+    emit_write_bytecode_byte_uint(emit, -1, MP_BC_POINTER_ASSIGN_FAST, local_num);
+}
+
+// Pointer assignment to global variable
+void mp_emit_bc_pointer_assign_global(emit_t *emit, qstr qst, int kind) {
+    emit_write_bytecode_byte_qstr(emit, -1, MP_BC_POINTER_ASSIGN_GLOBAL, qst);
+}
+
+const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_pointer_assign_ops = {
+    .local = mp_emit_bc_pointer_assign_local,
+    .global = mp_emit_bc_pointer_assign_global,
+};
+
 // Pointer member access operation
 void mp_emit_bc_pointer_member_access(emit_t *emit, qstr member) {
     emit_write_bytecode_byte_qstr(emit, 0, MP_BC_POINTER_MEMBER_ACCESS, member);
+}
+
+// Pointer member assignment operation
+void mp_emit_bc_pointer_member_assign(emit_t *emit, qstr member) {
+    emit_write_bytecode_byte_qstr(emit, -2, MP_BC_POINTER_MEMBER_ASSIGN, member);
 }
 void mp_emit_bc_build(emit_t *emit, mp_uint_t n_args, int kind) {
     MP_STATIC_ASSERT(MP_BC_BUILD_TUPLE + MP_EMIT_BUILD_TUPLE == MP_BC_BUILD_TUPLE);
@@ -903,6 +924,10 @@ const emit_method_table_t emit_bc_method_table = {
     {
         mp_emit_bc_pointer_deref_local,
         mp_emit_bc_pointer_deref_global,
+    },
+    {
+        mp_emit_bc_pointer_assign_local,
+        mp_emit_bc_pointer_assign_global,
     },
 
     mp_emit_bc_label_assign,
