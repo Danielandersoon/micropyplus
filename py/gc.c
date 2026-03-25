@@ -569,10 +569,11 @@ void gc_sweep_all(void) {
 }
 
 static bool gc_should_compact(void) {
-    /* Calculate fragmentation without acquiring lock (we're already in GC)
-    // Just check if we have significant fragmentation
-    // For now, always compact (can be optimized later with threshold) */
+    #if MICROPY_VARIANT_BACKWARD_COMPATIBLE
     return true;
+    #else
+    return false;
+    #endif
 }
 
 // Function to free forward table
