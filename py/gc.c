@@ -570,9 +570,9 @@ void gc_sweep_all(void) {
 
 static bool gc_should_compact(void) {
     #if MICROPY_VARIANT_BACKWARD_COMPATIBLE
-    return true;
-    #else
     return false;
+    #else
+    return true;
     #endif
 }
 
