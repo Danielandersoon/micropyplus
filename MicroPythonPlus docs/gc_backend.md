@@ -148,8 +148,9 @@ As objects are allocated and freed:
 
 ```
 Initial:  [A][B][C][ free ][ free ]
-After:    [A][ ][ ][ free ][free][free]
-              (B freed) (C freed)
+(B Marked and sweeped)
+After:    [A][C][ free ][ free ][ free ]
+              
 ```
 
 **Issues:**
