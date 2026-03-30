@@ -115,7 +115,7 @@
 #define MP_BC_POINTER_MEMBER_ACCESS         (MP_BC_BASE_QSTR_O + 0x0f) // qstr - member name
 
 // Pointer assignment opcodes
-#define MP_BC_POINTER_ASSIGN_FAST           (MP_BC_BASE_VINT_E + 0x0a) // uint - local variable index, value on stack
+#define MP_BC_POINTER_ASSIGN_FAST           (MP_BC_BASE_VINT_O + 0x0c) // uint - local variable index, value on stack
 #define MP_BC_POINTER_ASSIGN_GLOBAL         (MP_BC_BASE_VINT_O + 0x0a) // qstr - global variable name, value on stack
 #define MP_BC_POINTER_MEMBER_ASSIGN         (MP_BC_BASE_VINT_O + 0x0b) // qstr - member name, value on stack
 
