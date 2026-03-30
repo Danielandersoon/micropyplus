@@ -26,6 +26,7 @@
 
 // options to control how MicroPython is built
 
+#define MICROPY_MALLOC_USES_ALLOCATED_SIZE (1)
 #define MICROPY_ALLOC_PATH_MAX      (PATH_MAX)
 #define MICROPY_PERSISTENT_CODE_LOAD (0)
 #define MICROPY_PERSISTENT_CODE_LOAD_NATIVE (0)

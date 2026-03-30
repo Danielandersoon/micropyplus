@@ -60,6 +60,7 @@
 #endif
 
 // memory allocation policies
+#define MICROPY_MALLOC_USES_ALLOCATED_SIZE (0)
 #ifndef MICROPY_GC_STACK_ENTRY_TYPE
 #if MICROPY_HW_SDRAM_SIZE
 #define MICROPY_GC_STACK_ENTRY_TYPE uint32_t
