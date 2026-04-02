@@ -5,7 +5,6 @@ import sys
 
 max_heap_ptr = 0
 max_heap_std = 0
-max_heap_mut = 0
 
 def fibonacci_ref(ptr_n, ptr_val_1, ptr_val_2, ptr_temp):
     """Calculate the nth Fibonacci number using pointer arithmetic"""
@@ -33,22 +32,10 @@ def fibonacci(n, val_1, val_2, temp):
         n -= 1
         return fibonacci(n, val_1, val_2, temp) 
 
-def fibonacci_mutable(n, val_1, val_2, temp):
-    """Calculate the nth Fibonacci number using mutable objects"""
-    
-    if n[0] <= 0:
-        return val_2[0]
-    else:
-        temp[0] = val_1[0] + val_2[0]
-        val_1[0] = val_2[0]
-        val_2[0] = temp[0]
-        n[0] -= 1
-        return fibonacci_mutable(n, val_1, val_2, temp)
-    
 if __name__ == "__main__":
 
-    performance_metrics = [[], [], [], [], [], [], [], [], [], []] # 0: ptr time, 1: standard time, 2: mutable time, 3: ptr result, 4: standard result, 5: mutable result, 6: time dif ptr std, 7: time ratio std/ptr, 8: time ratio std/mutable, 9: time ratio ptr/mutable
-    memory_metrics = [[], [], []]  # 0: ptr memory, 1: standard memory, 2: mutable memory
+    performance_metrics = [[], [], [], [], [], []] # 0: ptr time, 1: standard time, 2: standard result, 3: ref results, 4: time dif ptr std, 5: time ratio std/ptr
+    memory_metrics = [[], []]  # 0: ptr memory, 1: standard memory
 
     for i in range (1000):
         n = 49
@@ -102,66 +89,33 @@ if __name__ == "__main__":
         max_heap_std = gc.mem_alloc()  # Capture at end of batch
 
         performance_metrics[1].append(run_time)
-        performance_metrics[4].append(result)
+        performance_metrics[2].append(result)
         memory_metrics[1].append(max_heap_std)
         
-        n3 = [49]
-        val_1_3 = [1]
-        val_2_3 = [0]
-        temp_3 = [0]
-
-        # Memory usage for mutable version
-        start_time = time.time()
-        for x in range (100):
-            result = fibonacci_mutable(n3, val_1_3, val_2_3, temp_3)
-            n3[0] = 49
-            val_1_3[0] = 1
-            val_2_3[0] = 0
-            temp_3[0] = 0
-
-        end_time = time.time()
-        run_time_mutable = end_time - start_time
-        max_heap_mut = gc.mem_alloc()  # Capture at end of batch
-
-        performance_metrics[2].append(run_time_mutable)
-        performance_metrics[5].append(result)
-        memory_metrics[2].append(max_heap_mut)
-
-        performance_metrics[6].append(run_time - run_time_ptr)
-        performance_metrics[7].append(run_time / run_time_ptr)
-        performance_metrics[8].append(run_time / run_time_mutable)
-        performance_metrics[9].append(run_time_mutable / run_time_ptr)
+        performance_metrics[4].append(run_time - run_time_ptr)
+        performance_metrics[5].append(run_time / run_time_ptr)
 
         
 
 
     print(f"Fibonacci result with pointers: {performance_metrics[3][0]}")
     print(f"Fibonacci result without pointers: {performance_metrics[4][0]}")
-    print(f"Fibonacci result with mutable objects: {performance_metrics[5][0]}")
     print(f"\nTiming Results:")
     print(f"Average time with pointers: {sum(performance_metrics[0])/len(performance_metrics[0])} seconds")
     print(f"Average time without pointers: {sum(performance_metrics[1])/len(performance_metrics[1])} seconds")
-    print(f"Average time with mutable objects: {sum(performance_metrics[2])/len(performance_metrics[2])} seconds")
-    print(f"Average time difference (standard - ptr): {sum(performance_metrics[6])/len(performance_metrics[6])} seconds")
-    print(f"Average time ratio (standard / ptr): {sum(performance_metrics[7])/len(performance_metrics[7])}")
-    print(f"Average time ratio (standard / mutable): {sum(performance_metrics[8])/len(performance_metrics[8])}")
-    print(f"Average time ratio (ptr / mutable): {sum(performance_metrics[9])/len(performance_metrics[9])}")
-    print(f"Average time ratio (mutable / ptr): {sum(performance_metrics[9])/len(performance_metrics[9])}")
-    print(f"Average time ratio (mutable / standard): {1 / (sum(performance_metrics[8])/len(performance_metrics[8]))}")
+    print(f"Average time difference (standard - ptr): {sum(performance_metrics[4])/len(performance_metrics[4])} seconds")
+    print(f"Average time ratio (standard / ptr): {sum(performance_metrics[5])/len(performance_metrics[5])}")
+
     
     print(f"\nMemory Usage Results:")
     print(f"Average memory used with pointers: {sum(memory_metrics[0])/len(memory_metrics[0])} bytes")
     print(f"Average memory used without pointers: {sum(memory_metrics[1])/len(memory_metrics[1])} bytes")
-    print(f"Average memory used with mutable objects: {sum(memory_metrics[2])/len(memory_metrics[2])} bytes")
     print(f"Memory ratio (standard / ptr): {(sum(memory_metrics[1])/len(memory_metrics[1])) / (sum(memory_metrics[0])/len(memory_metrics[0]))}")
-    print(f"Memory ratio (mutable / ptr): {(sum(memory_metrics[2])/len(memory_metrics[2])) / (sum(memory_metrics[0])/len(memory_metrics[0]))}")
     
     print(f"\nPeak Heap Usage During Recursion:")
     print(f"Max heap with pointers: {max_heap_ptr} bytes")
     print(f"Max heap without pointers: {max_heap_std} bytes")
-    print(f"Max heap with mutable objects: {max_heap_mut} bytes")
     print(f"Peak ratio (standard / ptr): {max_heap_std / max_heap_ptr if max_heap_ptr > 0 else 0}")
-    print(f"Peak ratio (mutable / ptr): {max_heap_mut / max_heap_ptr if max_heap_ptr > 0 else 0}")
     
     # Debug: Show memory info
     print(f"\nDebug Info:")
