@@ -5,7 +5,7 @@
 
 set -e  # Exit on error
 
-MICROPYPLUS="../ports/unix/build-backward_compatible/micropython"
+MICROPYPLUS="../ports/unix/build-standard/micropython"
 
 echo ""
 echo "//**************************************//"

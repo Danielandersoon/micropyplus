@@ -1731,9 +1731,10 @@ static bool gc_forward_table_insert(gc_forward_table_t *table, size_t old_block,
     // Expand table if needed
     if (table->count >= table->capacity) {
         size_t new_capacity = table->capacity == 0 ? 16 : table->capacity * 2;
+        size_t old_size = table->capacity * sizeof(gc_forward_entry_t);
+        size_t new_size = new_capacity * sizeof(gc_forward_entry_t);
         gc_forward_entry_t *new_entries = (gc_forward_entry_t *)m_realloc(table->entries,
-                                                                           table->capacity * sizeof(gc_forward_entry_t),
-                                                                           new_capacity * sizeof(gc_forward_entry_t));
+                                                                           old_size, new_size);
         if (new_entries == NULL) {
             return false;
         }

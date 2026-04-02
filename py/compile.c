@@ -448,12 +448,58 @@ static void c_if_cond(compiler_t *comp, mp_parse_node_t pn, bool jump_if, int la
 typedef enum { ASSIGN_STORE, ASSIGN_AUG_LOAD, ASSIGN_AUG_STORE } assign_kind_t;
 static mp_parse_node_t get_operand_node(mp_parse_node_t pn);
 static void c_assign(compiler_t *comp, mp_parse_node_t pn, assign_kind_t kind);
-
 static void c_assign_atom_expr(compiler_t *comp, mp_parse_node_struct_t *pns, assign_kind_t assign_kind) {
     if (assign_kind != ASSIGN_AUG_STORE) {
         compile_node(comp, pns->nodes[0]);
     }
 
+    if (MP_PARSE_NODE_IS_STRUCT(pns->nodes[1])) {
+        mp_parse_node_struct_t *pns1 = (mp_parse_node_struct_t *)pns->nodes[1];
+        
+        if (MP_PARSE_NODE_STRUCT_KIND(pns1) == PN_star_expr) {
+            mp_parse_node_t pn_ptr = pns1->nodes[0];
+            mp_parse_node_t pn_simple_ptr = get_operand_node(pn_ptr);
+            
+            if (MP_PARSE_NODE_IS_ID(pn_simple_ptr)) {
+                qstr qst = MP_PARSE_NODE_LEAF_ARG(pn_simple_ptr);
+                
+                if (assign_kind == ASSIGN_AUG_LOAD) {
+                    if (comp->pass != MP_PASS_SCOPE) {
+                        id_info_t *id_info = scope_find(comp->scope_cur, qst);
+                        if (id_info != NULL && (id_info->kind == ID_INFO_KIND_LOCAL || id_info->kind == ID_INFO_KIND_CELL)) {
+                            mp_emit_bc_pointer_deref_local(comp->emit, qst, id_info->local_num, 0);
+                        } else {
+                            mp_emit_bc_pointer_deref_global(comp->emit, qst, 0);
+                        }
+                    }
+                } else if (assign_kind == ASSIGN_AUG_STORE) {
+                    if (comp->pass != MP_PASS_SCOPE) {
+                        id_info_t *id_info = scope_find(comp->scope_cur, qst);
+                        if (id_info != NULL && (id_info->kind == ID_INFO_KIND_LOCAL || id_info->kind == ID_INFO_KIND_CELL)) {
+                            mp_emit_bc_pointer_assign_local(comp->emit, qst, id_info->local_num, 0);
+                        } else {
+                            mp_emit_bc_pointer_assign_global(comp->emit, qst, 0);
+                        }
+                    }
+                } else {
+                    // ASSIGN_STORE: simple assignment *ptr = value
+                    if (comp->pass == MP_PASS_SCOPE) {
+                        mp_emit_common_get_id_for_load(comp->scope_cur, qst);
+                    } else {
+                        id_info_t *id_info = scope_find(comp->scope_cur, qst);
+                        if (id_info != NULL && (id_info->kind == ID_INFO_KIND_LOCAL || id_info->kind == ID_INFO_KIND_CELL)) {
+                            mp_emit_bc_pointer_assign_local(comp->emit, qst, id_info->local_num, 0);
+                        } else {
+                            mp_emit_bc_pointer_assign_global(comp->emit, qst, 0);
+                        }
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    // Continue with existing trailer handling (bracket, period, ptr_member)
     if (MP_PARSE_NODE_IS_STRUCT(pns->nodes[1])) {
         mp_parse_node_struct_t *pns1 = (mp_parse_node_struct_t *)pns->nodes[1];
         if (MP_PARSE_NODE_STRUCT_KIND(pns1) == PN_atom_expr_trailers) {
@@ -466,6 +512,7 @@ static void c_assign_atom_expr(compiler_t *comp, mp_parse_node_struct_t *pns, as
             assert(MP_PARSE_NODE_IS_STRUCT(pns1->nodes[n - 1]));
             pns1 = (mp_parse_node_struct_t *)pns1->nodes[n - 1];
         }
+
         if (MP_PARSE_NODE_STRUCT_KIND(pns1) == PN_trailer_bracket) {
             if (assign_kind == ASSIGN_AUG_STORE) {
                 EMIT(rot_three);

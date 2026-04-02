@@ -163,7 +163,7 @@ Pointer opcodes use two encoding formats:
 ### Pointer Assignment Opcodes
 
 ```c
-#define MP_BC_POINTER_ASSIGN_FAST  (MP_BC_BASE_VINT_E + 0x0a)
+#define MP_BC_POINTER_ASSIGN_FAST  (MP_BC_BASE_VINT_O + 0x0c)
 // Arg: uint - local variable index
 // Stack: ... ptr value → ...
 // Pop value, pop pointer from local, assign through pointer

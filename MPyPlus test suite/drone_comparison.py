@@ -151,6 +151,42 @@ def battery_monitor_by_ref(battery):
         return "OK"
 
 #
+# PASS-BY-ASSIGNMENT FUNCTIONS
+#
+
+def stabilize_flight_by_assignment(imu, baro, controller):
+    """Stabilization - Python's default pass-by-assignment"""
+    # Direct access to object references (Python default)
+    roll_error = controller.roll - imu.roll
+    pitch_error = controller.pitch - imu.pitch
+    yaw_error = controller.yaw - imu.yaw
+    
+    motor_1 = controller.throttle + roll_error + pitch_error - yaw_error
+    motor_2 = controller.throttle - roll_error + pitch_error + yaw_error
+    motor_3 = controller.throttle - roll_error - pitch_error - yaw_error
+    motor_4 = controller.throttle + roll_error - pitch_error + yaw_error
+    
+    return {
+        "motor_1": motor_1,
+        "motor_2": motor_2,
+        "motor_3": motor_3,
+        "motor_4": motor_4
+    }
+
+
+def battery_monitor_by_assignment(battery):
+    """Monitor battery - Python's default pass-by-assignment"""
+    if battery.voltage < 9.5:
+        battery.critical_battery = True
+        return "CRITICAL"
+    elif battery.voltage < 10.5:
+        battery.low_battery_warning = True
+        return "WARNING"
+    else:
+        battery.low_battery_warning = False
+        return "OK"
+
+#
 # MAIN COMPARISON
 #
 
@@ -198,8 +234,8 @@ print(f"Total time: {total_time_val} ms")
 print("Memory after test:")
 mp.mem_info()
 
-# ========== TEST 2: PASS-BY-REFERENCE (POINTERS) ==========
-print("\n\nTEST 2: PASS-BY-REFERENCE (POINTER-BASED) VERSION")
+# ========== TEST 2: PASS-BY-REFERENCE (DIRECT ACCESS) ==========
+print("\n\nTEST 2: PASS-BY-REFERENCE (DIRECT ACCESS) VERSION")
 print("-" * 90)
 
 print("\nInitializing sensors...")
@@ -208,16 +244,10 @@ baro_ref = BarometerSensor()
 battery_ref = BatteryMonitor()
 controller_ref = FlightController()
 
-# Create pointers (for demonstration)
-ptr_imu = &imu_ref
-ptr_baro = &baro_ref
-ptr_battery = &battery_ref
-ptr_controller = &controller_ref
-
-print("Memory before test (with pointers):")
+print("Memory before test (direct access):")
 mp.mem_info()
 
-print("\nRunning 50 control loop iterations (no object copying)...")
+print("\nRunning 86 control loop iterations (no object copying)...")
 total_time_ref = 0
 for cycle in range(86):
     cycle_start = time.ticks_ms()
@@ -242,6 +272,44 @@ print(f"Total time: {total_time_ref} ms")
 print("Memory after test:")
 mp.mem_info()
 
+# ========== TEST 3: PASS-BY-ASSIGNMENT (PYTHON DEFAULT) ==========
+print("\n\nTEST 3: PASS-BY-ASSIGNMENT (PYTHON DEFAULT) VERSION")
+print("-" * 90)
+
+print("\nInitializing sensors...")
+imu_assign = IMUSensor()
+baro_assign = BarometerSensor()
+battery_assign = BatteryMonitor()
+controller_assign = FlightController()
+
+print("Memory before test (Python default pass-by-assignment):")
+mp.mem_info()
+
+print("\nRunning 86 control loop iterations (Python's default semantics)...")
+total_time_assign = 0
+for cycle in range(86):
+    cycle_start = time.ticks_ms()
+    
+    # Update sensor values
+    imu_assign.roll = 0.1 * cycle
+    imu_assign.pitch = 0.05 * cycle
+    imu_assign.yaw = 0.2 * cycle
+    baro_assign.altitude = 10.0 + (0.1 * cycle)
+    controller_assign.throttle = 0.5 + (0.0001 * cycle)
+    
+    # Run control algorithms (Python's default: pass-by-assignment)
+    stab_result = stabilize_flight_by_assignment(imu_assign, baro_assign, controller_assign)
+    batt_status = battery_monitor_by_assignment(battery_assign)
+    
+    cycle_end = time.ticks_ms()
+    cycle_time = cycle_end - cycle_start
+    total_time_assign += cycle_time
+
+print(f"Completed 86 cycles")
+print(f"Total time: {total_time_assign} ms")
+print("Memory after test:")
+mp.mem_info()
+
 # ========== COMPARISON ANALYSIS ==========
 print("\n\n" + "#" * 90)
 print("#\n# PERFORMANCE COMPARISON\n#")
@@ -249,7 +317,12 @@ print("#" * 90)
 
 print(f"""
 EXECUTION TIME:
-  Pass-by-Value:      {total_time_val} ms
-  Pass-by-Reference:  {total_time_ref} ms
-  Difference:         {total_time_val - total_time_ref} ms
+  Pass-by-Value:           {total_time_val} ms
+  Pass-by-Reference:       {total_time_ref} ms
+  Pass-by-Assignment:      {total_time_assign} ms (Python Default)
+  
+COMPARISON:
+  Value vs Reference:      {total_time_val - total_time_ref} ms
+  Value vs Assignment:     {total_time_val - total_time_assign} ms
+  Reference vs Assignment: {total_time_ref - total_time_assign} ms
 """)

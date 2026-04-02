@@ -584,34 +584,53 @@ dispatch_loop:
                 }
 
                 // MUTABLE POINTER ASSIGNMENT OPCODES
-                ENTRY(MP_BC_POINTER_ASSIGN_FAST): {
-                    MARK_EXC_IP_SELECTIVE();
-                    DECODE_UINT;
-                    // Get the pointer from local variable
-                    mp_obj_t ptr_obj = fastn[-unum];
-                    
-                    // Validate ptr status
-                    if (!MP_OBJ_IS_TYPE(ptr_obj, &mp_type_pointer)) {
-                        RAISE(mp_obj_new_exception_msg(&mp_type_TypeError, MP_ERROR_TEXT("expected pointer")));
-                    }
-                    
-                    // Get the actual/raw pointer
-                    mp_obj_t *ptr = (mp_obj_t *)mp_obj_pointer_get(ptr_obj);
-                    
-                    // Check if pointer is NULL or points to invalid location
-                    if (ptr == NULL || (uintptr_t)ptr < 0x1000 || (uintptr_t)ptr > 0x7fffffff0000ULL) {
-                        RAISE(mp_obj_new_exception_msg(&mp_type_ValueError, MP_ERROR_TEXT("invalid pointer value")));
-                    }
-                    
-                    // Get value from stack
-                    mp_obj_t value = POP();
-                    
-                    // Write through pointer
-                    *ptr = value;
-                    
-                    DISPATCH();
-                }
-
+ENTRY(MP_BC_POINTER_ASSIGN_FAST): {
+    MARK_EXC_IP_SELECTIVE();
+    DECODE_UINT;
+    
+    // DEBUG: Print stack state
+    printf("POINTER_ASSIGN_FAST: unum=%lu, sp_index=%td\n", (unsigned long)unum, sp - &sp[0]);
+    
+    // Print top of stack (value to be assigned)
+    mp_obj_t top_value = TOP();
+    printf("  Top of stack (value): ");
+    mp_obj_print(top_value, PRINT_REPR);
+    printf("\n");
+    
+    // Get pointer from local variable
+    mp_obj_t ptr_obj = fastn[-unum];
+    printf("  Pointer from local slot %lu: ", (unsigned long)unum);
+    mp_obj_print(ptr_obj, PRINT_REPR);
+    printf("\n");
+    
+    // Validate ptr status
+    if (!MP_OBJ_IS_TYPE(ptr_obj, &mp_type_pointer)) {
+        printf("  ERROR: Not a pointer object!\n");
+        RAISE(mp_obj_new_exception_msg(&mp_type_TypeError, MP_ERROR_TEXT("expected pointer")));
+    }
+    
+    // Get the actual/raw pointer
+    mp_obj_t *ptr = (mp_obj_t *)mp_obj_pointer_get(ptr_obj);
+    printf("  Raw pointer address: %p\n", (void*)ptr);
+    
+    // Check if pointer is NULL or points to invalid location
+    if (ptr == NULL || (uintptr_t)ptr < 0x1000 || (uintptr_t)ptr > 0x7fffffff0000ULL) {
+        printf("  ERROR: Invalid pointer value\n");
+        RAISE(mp_obj_new_exception_msg(&mp_type_ValueError, MP_ERROR_TEXT("invalid pointer value")));
+    }
+    
+    // Get value from stack
+    mp_obj_t value = POP();
+    printf("  Assigning value: ");
+    mp_obj_print(value, PRINT_REPR);
+    printf("\n");
+    
+    // Write through pointer
+    *ptr = value;
+    printf("  Assignment successful\n");
+    
+    DISPATCH();
+}
                 ENTRY(MP_BC_POINTER_ASSIGN_GLOBAL): {
                     MARK_EXC_IP_SELECTIVE();
                     DECODE_QSTR;

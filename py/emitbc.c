@@ -748,12 +748,12 @@ const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_address_of_ops = {
 // Pointer dereference of local variable
 void mp_emit_bc_pointer_deref_local(emit_t *emit, qstr qst, mp_uint_t local_num, int kind) {
     (void)qst;
-    emit_write_bytecode_byte_uint(emit, 0, MP_BC_POINTER_DEREF_FAST, local_num);
+    emit_write_bytecode_byte_uint(emit, 1, MP_BC_POINTER_DEREF_FAST, local_num);
 }
 
 // Pointer dereference of global variable
 void mp_emit_bc_pointer_deref_global(emit_t *emit, qstr qst, int kind) {
-    emit_write_bytecode_byte_qstr(emit, 0, MP_BC_POINTER_DEREF_GLOBAL, qst);
+    emit_write_bytecode_byte_qstr(emit, 1, MP_BC_POINTER_DEREF_GLOBAL, qst);
 }
 
 const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_pointer_deref_ops = {
