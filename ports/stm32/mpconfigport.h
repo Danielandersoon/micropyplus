@@ -292,6 +292,9 @@ typedef long mp_off_t;
 // We need an implementation of the log2 function which is not a macro
 #define MP_NEED_LOG2 (1)
 
+// Memory allocation configuration
+#define MICROPY_MALLOC_USES_ALLOCATED_SIZE  (0)
+
 // We need to provide a declaration/definition of alloca()
 #include <alloca.h>
 

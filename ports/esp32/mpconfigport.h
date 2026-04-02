@@ -21,6 +21,7 @@
 #endif
 
 // memory allocation policies
+#define MICROPY_MALLOC_USES_ALLOCATED_SIZE  (0)
 #define MICROPY_ALLOC_PATH_MAX              (128)
 
 // Initial Python heap size.  This starts small but adds new heap areas on demand due to
