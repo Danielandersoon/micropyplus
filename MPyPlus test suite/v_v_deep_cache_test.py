@@ -39,7 +39,7 @@ def pointer_cached_deep(ptr, iterations):
 root_obj = OuterClass()          # Create the object graph
 ptr_to_root = &root_obj          # Pointer to the root
 
-iterations = 1_000_000
+iterations = 1000000
 
 # Warm‑up (optional)
 standard_deep(root_obj, 1000)

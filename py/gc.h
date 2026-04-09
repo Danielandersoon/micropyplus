@@ -150,9 +150,4 @@ typedef struct {
     bool in_progress;
 } gc_compact_state_t;
 
-void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
-void gc_compact_copy(mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
-void gc_update_references(mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
-
-
 #endif // MICROPY_INCLUDED_PY_GC_H
