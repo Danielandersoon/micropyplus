@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the internal implementation of the pointer reference system in MicroPython Plus. This is a technical reference for developers working on the MicroPython compiler, virtual machine, and runtime systems.
+This document describes the internal implementation of the pointer reference system in MicroPyPlus. This is a technical reference for developers working on the MicroPython compiler, virtual machine, and runtime systems.
 
 ## Architecture Overview
 

@@ -755,7 +755,7 @@ void gc_collect_end(void) {
     DEBUG_printf("gc_collect_end: freeing blocks (Sweep)\n");
     gc_sweep_free_blocks();
     
-    // Perform compaction on the "clean" heap
+    // Finalize frontiers after the sweep has cleared garbage
     if (compaction_performed) {
         for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
             // Shift the left frontier and update allocator state based on compacted positions
@@ -1969,7 +1969,7 @@ static void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forwar
     for (size_t block = 0; block < max_block; block++) {
         byte block_kind = ATB_GET_KIND(area, block);
 
-        // After sweep, live objects are AT_HEAD
+        // In Mark-Compact-Sweep, we process objects currently at AT_HEAD
         if (block_kind == AT_HEAD) {
             // Count the number of consecutive blocks
             size_t block_count = 1;

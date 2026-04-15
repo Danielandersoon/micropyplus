@@ -2,7 +2,7 @@
 
 ## Overview
 
-The MicroPython Plus garbage collector has been enhanced with two major improvements:
+The MicroPyPlus garbage collector has been enhanced with two major improvements:
 
 1. **Heap Compaction** - A new compaction phase that defragments the heap by moving objects, reducing fragmentation and enabling better memory utilization.
 2. **Bidirectional Allocation** - Objects are allocated from both ends of the heap: regular objects from the left, pinned objects from the right, preventing compaction-related corruption of pointers.
@@ -14,17 +14,20 @@ These changes work together to support the pointer system while maintaining GC e
 The enhanced GC pipeline:
 
 ```
-Allocation Phase
-    ↓
-Mark Phase 
-    ↓
-Sweep Phase
-    ↓
-Compaction Phase 
-    ↓
-Update References Phase 
-    ↓
-Finalization
+            Allocation Phase
+                    ↓
+                Mark Phase 
+                    ↓
+                Compaction Phase 
+(Defragments the heap by moving identified objects)
+                    ↓
+              Update References 
+(Fixes internal and root pointers to new locations)
+                    ↓
+                Sweep Phase 
+        (Finalizes unreachable objects)
+                    ↓
+                Finalization
 ```
 
 ## Bidirectional Allocation Strategy
@@ -615,8 +618,8 @@ y = *ptr                # Still valid, points to same block
 |-----------|-----------|-------|
 | Pin object | O(n + s) | n=pinned objects, s=object size |
 | Unpin object | O(n + s) | Search + removal + block marking |
-| Compute forwarding | O(b) | b=total blocks in heap |
-| Compact copy | O(m) | m=bytes moved |
+| Compute forwarding | O(n) | n=total blocks in heap |
+| Compact copy | O(n) | n=bytes moved |
 | Update references| O(n) | n=heap objects, scan all refs |
 | Total compaction | O(b + m + n) | Linear in heap content |
 
