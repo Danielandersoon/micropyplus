@@ -758,9 +758,6 @@ void gc_collect_end(void) {
     // Finalize frontiers after the sweep has cleared garbage
     if (compaction_performed) {
         for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
-            // Shift the left frontier and update allocator state based on compacted positions
-            gc_shift_left_frontier(area);
-
             // Set gc_last_free_atb_index to scan starting right after the compacted area
             size_t first_free_block = area->gc_last_used_block + 1;
             area->gc_last_free_atb_index = first_free_block / BLOCKS_PER_ATB;
@@ -897,8 +894,6 @@ static void gc_sweep_free_blocks(void) {
 
         DEBUG_printf("gc_sweep_free_blocks: sweep loop done, last_used_block=" UINT_FMT ", was " UINT_FMT "\n", 
                      last_used_block, area->gc_last_used_block);
-        area->gc_last_used_block = last_used_block;
-        DEBUG_printf("gc_sweep_free_blocks: frontier set to " UINT_FMT "\n", area->gc_last_used_block);
 
         #if MICROPY_GC_SPLIT_HEAP_AUTO
         // Free any empty area, aside from the first one
@@ -2099,6 +2094,32 @@ static void gc_compact_copy(mp_state_mem_area_t *area, gc_forward_table_t *forwa
     }
 
     DEBUG_printf("gc_compact_copy: copy phase complete\n");
+
+    // Clear any remaining AT_MARK blocks
+    for (size_t block = 0; block < max_block; block++) {
+        byte block_kind = ATB_GET_KIND(area, block);
+        if (block_kind == AT_MARK) {
+            // count and clear HEAD + all TAIL blocks
+            size_t tail_count = 0;
+            size_t check_block = block + 1;
+            while (check_block < max_block && ATB_GET_KIND(area, check_block) == AT_TAIL) {
+                tail_count++;
+                check_block++;
+            }
+            
+            // Clear HEAD
+            ATB_ANY_TO_FREE(area, block);
+            DEBUG_printf("gc_compact_copy: clearing unreachable marked block " UINT_FMT " (+ " UINT_FMT " tail blocks)\n", block, tail_count);
+            
+            // Clear all TAIL blocks
+            for (size_t i = 0; i < tail_count; i++) {
+                ATB_ANY_TO_FREE(area, block + 1 + i);
+            }
+            
+            // Skip past these blocks
+            block += tail_count;
+        }
+    }
 
     // VALIDATION: Check ATB integrity after copy
     {
