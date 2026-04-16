@@ -852,7 +852,7 @@ static void gc_sweep_free_blocks(void) {
 
     for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
         DEBUG_printf("gc_sweep_free_blocks: ENTER area, gc_last_used_block=" UINT_FMT "\n", area->gc_last_used_block);
-        size_t last_used_block = 0;
+        size_t last_used_block __attribute__((unused)) = 0;
         assert(area->gc_last_used_block <= area->gc_alloc_table_byte_len * BLOCKS_PER_ATB);
 
         for (size_t block = 0; block <= area->gc_last_used_block; block++) {
