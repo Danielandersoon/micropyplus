@@ -610,6 +610,7 @@ static bool gc_should_compact(void) {
 }
 
 // Shift the left frontier to reflect the actual compacted heap state
+__attribute__((unused))
 static void gc_shift_left_frontier(mp_state_mem_area_t *area) {
     DEBUG_printf("gc_shift_left_frontier: before shift, left frontier at block " UINT_FMT "\n", 
                  area->gc_last_used_block_from_left);
@@ -656,6 +657,7 @@ void gc_forward_table_free(gc_forward_table_t *table) {
 }
 
 // Verification: Ensure no AT_MARK bits remain and all bits past frontier are AT_FREE
+__attribute__((unused))
 static void gc_verify_compacted_heap(mp_state_mem_area_t *area) {
     size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
     size_t frontier = area->gc_last_used_block;
@@ -672,6 +674,7 @@ static void gc_verify_compacted_heap(mp_state_mem_area_t *area) {
 }
 
 // Dump all occupied blocks in the heap after compaction
+__attribute__((unused))
 static void gc_dump_occupied_blocks(mp_state_mem_area_t *area) {
     #if MICROPY_DEBUG_VERBOSE
     size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
@@ -718,6 +721,7 @@ void gc_collect_end(void) {
 
     bool compaction_performed = gc_should_compact();
     if (compaction_performed) {
+        #if MICROPY_VARIANT_BACKWARD_COMPATIBLE
         DEBUG_printf("gc_collect_end: starting compaction\n");
         for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
             // Phase 0: Count live objects after sweep and pre-allocate forward table
@@ -747,6 +751,7 @@ void gc_collect_end(void) {
             gc_dump_occupied_blocks(area);
             gc_verify_compacted_heap(area);
         }
+        #endif
     }
 
     DEBUG_printf("gc_collect_end: running finalisers\n");
@@ -1914,6 +1919,7 @@ static size_t gc_forward_table_lookup(gc_forward_table_t *table, size_t old_bloc
     return (size_t)-1;
 }
 
+__attribute__((unused))
 static size_t gc_count_live_objects(mp_state_mem_area_t *area) {
     size_t count = 0;
     size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
@@ -1932,6 +1938,7 @@ static size_t gc_count_live_objects(mp_state_mem_area_t *area) {
     return count;
 }
 
+__attribute__((unused))
 static bool gc_forward_table_prealloc(gc_forward_table_t *table, size_t size) {
     if (size == 0) {
         table->entries = NULL;
@@ -1951,6 +1958,7 @@ static bool gc_forward_table_prealloc(gc_forward_table_t *table, size_t size) {
 }
 
 // Maps old block positions to new compacted positions
+__attribute__((unused))
 static void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) { 
     if (forward_table->entries == NULL || forward_table->capacity == 0) {
         DEBUG_printf("gc_compute_forwarding_addresses: forward table not pre-allocated\n");
@@ -2019,6 +2027,7 @@ static void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forwar
 }
 
 // Updates allocation table for new block positions
+__attribute__((unused))
 static void gc_compact_copy(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
     // Physically copy live objects to their new locations
     DEBUG_printf("gc_compact_copy: starting copy phase\n");
@@ -2140,6 +2149,7 @@ static void gc_compact_copy(mp_state_mem_area_t *area, gc_forward_table_t *forwa
     }
 }
 
+__attribute__((unused))
 static void gc_update_references(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
     // Update all internal object references
     size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
@@ -2242,7 +2252,7 @@ static void *gc_update_ptr(void *ptr, gc_forward_table_t *forward_table) {
 }
 
 
-
+__attribute__((unused))
 static void gc_update_roots(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
     DEBUG_printf("gc_update_roots: ENTER\n");
     #if !MICROPY_GC_SPLIT_HEAP
