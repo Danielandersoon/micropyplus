@@ -9,11 +9,19 @@ typedef struct _mp_obj_pointer_t {
     intptr_t addr;  // Store the address using intptr_t to preserve full pointer value
 } mp_obj_pointer_t;
 
+// Print function for pointer objects
+static void pointer_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
+    (void)kind;
+    mp_obj_pointer_t *o = MP_OBJ_TO_PTR(self_in);
+    mp_printf(print, "0x%lx", (unsigned long)o->addr);
+}
+
 // Type definition
 MP_DEFINE_CONST_OBJ_TYPE(
     mp_type_pointer,
     MP_QSTR_pointer,
-    MP_TYPE_FLAG_NONE
+    MP_TYPE_FLAG_NONE,
+    print, pointer_print
 );
 
 // Create a new pointer object wrapping the given address
