@@ -16,12 +16,99 @@ static void pointer_print(const mp_print_t *print, mp_obj_t self_in, mp_print_ki
     mp_printf(print, "0x%lx", (unsigned long)o->addr);
 }
 
+// Binary operations on pointers (addition, subtraction, comparison)
+static mp_obj_t pointer_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t rhs_in) {
+    // Extract left hand side pointer address
+    if (!mp_obj_is_type(lhs_in, &mp_type_pointer)) {
+        return MP_OBJ_NULL; // Not a pointer on LHS
+    }
+    mp_obj_pointer_t *lhs = MP_OBJ_TO_PTR(lhs_in);
+    intptr_t lhs_addr = lhs->addr;
+
+    switch (op) {
+        case MP_BINARY_OP_ADD:
+        case MP_BINARY_OP_INPLACE_ADD: {
+            // ptr + int → new pointer
+            mp_int_t offset = mp_obj_get_int(rhs_in);
+            intptr_t new_addr = lhs_addr + offset;
+            return mp_obj_new_pointer((mp_obj_t *)new_addr);
+        }
+
+        case MP_BINARY_OP_SUBTRACT:
+        case MP_BINARY_OP_INPLACE_SUBTRACT: {
+            if (mp_obj_is_type(rhs_in, &mp_type_pointer)) {
+                // ptr - ptr → int (difference in bytes)
+                mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
+                intptr_t diff = lhs_addr - rhs->addr;
+                return mp_obj_new_int(diff);
+            } else {
+                // ptr - int → new pointer
+                mp_int_t offset = mp_obj_get_int(rhs_in);
+                intptr_t new_addr = lhs_addr - offset;
+                return mp_obj_new_pointer((mp_obj_t *)new_addr);
+            }
+        }
+
+        case MP_BINARY_OP_EQUAL: {
+            if (mp_obj_is_type(rhs_in, &mp_type_pointer)) {
+                mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
+                return mp_obj_new_bool(lhs_addr == rhs->addr);
+            }
+            return mp_obj_new_bool(false);
+        }
+
+        case MP_BINARY_OP_NOT_EQUAL: {
+            if (mp_obj_is_type(rhs_in, &mp_type_pointer)) {
+                mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
+                return mp_obj_new_bool(lhs_addr != rhs->addr);
+            }
+            return mp_obj_new_bool(true);
+        }
+
+        case MP_BINARY_OP_LESS: {
+            if (mp_obj_is_type(rhs_in, &mp_type_pointer)) {
+                mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
+                return mp_obj_new_bool(lhs_addr < rhs->addr);
+            }
+            return MP_OBJ_NULL; // Can't compare pointer to non-pointer
+        }
+
+        case MP_BINARY_OP_LESS_EQUAL: {
+            if (mp_obj_is_type(rhs_in, &mp_type_pointer)) {
+                mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
+                return mp_obj_new_bool(lhs_addr <= rhs->addr);
+            }
+            return MP_OBJ_NULL;
+        }
+
+        case MP_BINARY_OP_MORE: {
+            if (mp_obj_is_type(rhs_in, &mp_type_pointer)) {
+                mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
+                return mp_obj_new_bool(lhs_addr > rhs->addr);
+            }
+            return MP_OBJ_NULL;
+        }
+
+        case MP_BINARY_OP_MORE_EQUAL: {
+            if (mp_obj_is_type(rhs_in, &mp_type_pointer)) {
+                mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
+                return mp_obj_new_bool(lhs_addr >= rhs->addr);
+            }
+            return MP_OBJ_NULL;
+        }
+
+        default:
+            return MP_OBJ_NULL; // Operation not supported
+    }
+}
+
 // Type definition
 MP_DEFINE_CONST_OBJ_TYPE(
     mp_type_pointer,
     MP_QSTR_pointer,
     MP_TYPE_FLAG_NONE,
-    print, pointer_print
+    print, pointer_print,
+    binary_op, pointer_binary_op
 );
 
 // Create a new pointer object wrapping the given address
