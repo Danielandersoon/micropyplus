@@ -740,6 +740,11 @@ static void mp_emit_bc_address_of_global(emit_t *emit, qstr qst, int kind) {
     emit_write_bytecode_byte_qstr(emit, 1, MP_BC_ADDRESS_OF_GLOBAL, qst);
 }
 
+// Address-of subscript element: stack[base, index] -> [ptr_to_element]
+void mp_emit_bc_address_of_subscr(emit_t *emit) {
+    emit_write_bytecode_byte(emit, -1, MP_BC_ADDRESS_OF_SUBSCR);
+}
+
 const mp_emit_method_table_id_ops_t mp_emit_bc_method_table_address_of_ops = {
     .local = mp_emit_bc_address_of_local,
     .global = mp_emit_bc_address_of_global,

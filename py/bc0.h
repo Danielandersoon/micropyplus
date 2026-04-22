@@ -110,6 +110,7 @@
 // Pointer Reference assignment and deref opcodes
 #define MP_BC_ADDRESS_OF_FAST               (MP_BC_BASE_VINT_O + 0x08) // uint - local variable index
 #define MP_BC_ADDRESS_OF_GLOBAL             (MP_BC_BASE_QSTR_O + 0x0d) // qstr - global variable name
+#define MP_BC_ADDRESS_OF_SUBSCR             (MP_BC_BASE_BYTE_E + 0x0a) // No inline args - stack: [base, index] -> [ptr]
 #define MP_BC_POINTER_DEREF_FAST            (MP_BC_BASE_VINT_O + 0x09) // uint - local variable index
 #define MP_BC_POINTER_DEREF_GLOBAL          (MP_BC_BASE_QSTR_O + 0x0e) // qstr - global variable name
 #define MP_BC_POINTER_MEMBER_ACCESS         (MP_BC_BASE_QSTR_O + 0x0f) // qstr - member name
