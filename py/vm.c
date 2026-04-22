@@ -557,11 +557,62 @@ dispatch_loop:
                     DISPATCH();
                 }
 
+                ENTRY(MP_BC_ADDRESS_OF_SUBSCR): {
+                    // Stack on entry: [... base, index]
+                    // Stack on exit: [... ptr_to_element]
+                    // base should be a list, index should be an integer
+                    
+                    MARK_EXC_IP_SELECTIVE();
+                    
+                    // Pop index from stack
+                    mp_obj_t index_obj = POP();
+                    
+                    // Get base (now at TOP)
+                    mp_obj_t base_obj = TOP();
+                    
+                    // Validate base is a list
+                    if (!mp_obj_is_type(base_obj, &mp_type_list)) {
+                        mp_raise_TypeError(MP_ERROR_TEXT("cannot take address of non-list subscript"));
+                    }
+                    
+                    // Validate index is integer
+                    if (!mp_obj_is_int(index_obj)) {
+                        mp_raise_TypeError(MP_ERROR_TEXT("list indices must be integers"));
+                    }
+                    
+                    // Extract values
+                    mp_obj_list_t *list = MP_OBJ_TO_PTR(base_obj);
+                    mp_int_t idx = mp_obj_get_int(index_obj);
+                    
+                    // Handle negative indices (wrap around)
+                    if (idx < 0) {
+                        idx += list->len;
+                    }
+                    
+                    // Bounds check
+                    if (idx < 0 || idx >= (mp_int_t)list->len) {
+                        mp_raise_msg(&mp_type_IndexError, MP_ERROR_TEXT("list index out of range"));
+                    }
+                    
+                    // Calculate element address
+                    // List memory layout: base_addr + 32 (header) + (index * 8) (element size)
+                    intptr_t base_addr = (intptr_t)list;
+                    intptr_t elem_addr = base_addr + 32 + (idx * 8);
+                    
+                    // Create pointer object to element and replace TOP
+                    SET_TOP(mp_obj_new_pointer((void *)elem_addr));
+                    DISPATCH();
+                }
+
                 ENTRY(MP_BC_POINTER_DEREF_FAST): {
                     DECODE_UINT;
                     mp_obj_t ptr_obj = fastn[-unum];
-                    mp_obj_t *ptr = (mp_obj_t *)mp_obj_pointer_get(ptr_obj);
-                    PUSH(*ptr);
+                    if (mp_obj_is_obj(ptr_obj) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(ptr_obj))->type == &mp_type_pointer) {
+                        mp_obj_pointer_t *p = MP_OBJ_TO_PTR(ptr_obj);
+                        PUSH(*(mp_obj_t *)p->addr);
+                    } else {
+                        mp_raise_TypeError(MP_ERROR_TEXT("expected pointer object"));
+                    }
                     DISPATCH();
                 }
 
@@ -569,8 +620,25 @@ dispatch_loop:
                     MARK_EXC_IP_SELECTIVE();
                     DECODE_QSTR;
                     mp_obj_t ptr_obj = mp_load_global(qst);
-                    mp_obj_t *ptr = (mp_obj_t *)mp_obj_pointer_get(ptr_obj);
-                    PUSH(*ptr);
+                    if (mp_obj_is_obj(ptr_obj) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(ptr_obj))->type == &mp_type_pointer) {
+                        mp_obj_pointer_t *p = MP_OBJ_TO_PTR(ptr_obj);
+                        PUSH(*(mp_obj_t *)p->addr);
+                    } else {
+                        mp_raise_TypeError(MP_ERROR_TEXT("expected pointer object"));
+                    }
+                    DISPATCH();
+                }
+
+                ENTRY(MP_BC_POINTER_DEREF_STACK): {
+                    // Conditional dereference: check if value on stack is a pointer
+                    // Used for: *(ptr+N) in all contexts, *expr in star expressions
+                    // If it's a pointer, dereference it; otherwise leave unchanged for unpacking
+                    mp_obj_t obj_on_stack = TOP();
+                    if (mp_obj_is_obj(obj_on_stack) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(obj_on_stack))->type == &mp_type_pointer) {
+                        mp_obj_pointer_t *p = MP_OBJ_TO_PTR(obj_on_stack);
+                        SET_TOP(*(mp_obj_t *)p->addr);
+                    }
+                    // If not a pointer, leave it as-is (might be iterable for unpacking)
                     DISPATCH();
                 }
 
@@ -578,8 +646,12 @@ dispatch_loop:
                     MARK_EXC_IP_SELECTIVE();
                     DECODE_QSTR;
                     mp_obj_t ptr_obj = TOP();
-                    mp_obj_t *ptr = (mp_obj_t *)mp_obj_pointer_get(ptr_obj);
-                    SET_TOP(mp_load_attr(*ptr, qst));
+                    if (mp_obj_is_obj(ptr_obj) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(ptr_obj))->type == &mp_type_pointer) {
+                        mp_obj_pointer_t *p = MP_OBJ_TO_PTR(ptr_obj);
+                        SET_TOP(mp_load_attr(*(mp_obj_t *)p->addr, qst));
+                    } else {
+                        mp_raise_TypeError(MP_ERROR_TEXT("expected pointer object"));
+                    }
                     DISPATCH();
                 }
 
@@ -609,25 +681,31 @@ ENTRY(MP_BC_POINTER_ASSIGN_FAST): {
         RAISE(mp_obj_new_exception_msg(&mp_type_TypeError, MP_ERROR_TEXT("expected pointer")));
     }
     
-    // Get the actual/raw pointer
-    mp_obj_t *ptr = (mp_obj_t *)mp_obj_pointer_get(ptr_obj);
-    printf("  Raw pointer address: %p\n", (void*)ptr);
-    
-    // Check if pointer is NULL or points to invalid location
-    if (ptr == NULL || (uintptr_t)ptr < 0x1000 || (uintptr_t)ptr > 0x7fffffff0000ULL) {
-        printf("  ERROR: Invalid pointer value\n");
-        RAISE(mp_obj_new_exception_msg(&mp_type_ValueError, MP_ERROR_TEXT("invalid pointer value")));
+    // Optimized inline extraction: skip function call overhead
+    if (mp_obj_is_obj(ptr_obj) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(ptr_obj))->type == &mp_type_pointer) {
+        mp_obj_pointer_t *p = MP_OBJ_TO_PTR(ptr_obj);
+        mp_obj_t *ptr = (mp_obj_t *)p->addr;
+        
+        printf("  Raw pointer address: %p\n", (void*)ptr);
+        
+        // Check if pointer is NULL or points to invalid location
+        if (ptr == NULL || (uintptr_t)ptr < 0x1000 || (uintptr_t)ptr > 0x7fffffff0000ULL) {
+            printf("  ERROR: Invalid pointer value\n");
+            RAISE(mp_obj_new_exception_msg(&mp_type_ValueError, MP_ERROR_TEXT("invalid pointer value")));
+        }
+        
+        // Get value from stack
+        mp_obj_t value = POP();
+        printf("  Assigning value: ");
+        mp_obj_print(value, PRINT_REPR);
+        printf("\n");
+        
+        // Write through pointer
+        *ptr = value;
+        printf("  Assignment successful\n");
+    } else {
+        mp_raise_TypeError(MP_ERROR_TEXT("expected pointer object"));
     }
-    
-    // Get value from stack
-    mp_obj_t value = POP();
-    printf("  Assigning value: ");
-    mp_obj_print(value, PRINT_REPR);
-    printf("\n");
-    
-    // Write through pointer
-    *ptr = value;
-    printf("  Assignment successful\n");
     
     DISPATCH();
 }
@@ -642,14 +720,18 @@ ENTRY(MP_BC_POINTER_ASSIGN_FAST): {
                         RAISE(mp_obj_new_exception_msg(&mp_type_TypeError, MP_ERROR_TEXT("expected pointer")));
                     }
                     
-                    // Get the actual pointer
-                    mp_obj_t *ptr = (mp_obj_t *)mp_obj_pointer_get(ptr_obj);
-                    
-                    // Get value from stack
-                    mp_obj_t value = POP();
-                    
-                    // Write through pointer
-                    *ptr = value;
+                    if (mp_obj_is_obj(ptr_obj) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(ptr_obj))->type == &mp_type_pointer) {
+                        mp_obj_pointer_t *p = MP_OBJ_TO_PTR(ptr_obj);
+                        mp_obj_t *ptr = (mp_obj_t *)p->addr;
+                        
+                        // Get value from stack
+                        mp_obj_t value = POP();
+                        
+                        // Write through pointer
+                        *ptr = value;
+                    } else {
+                        mp_raise_TypeError(MP_ERROR_TEXT("expected pointer object"));
+                    }
                     
                     DISPATCH();
                 }
@@ -668,11 +750,16 @@ ENTRY(MP_BC_POINTER_ASSIGN_FAST): {
                         RAISE(mp_obj_new_exception_msg(&mp_type_TypeError, MP_ERROR_TEXT("expected pointer")));
                     }
                     
-                    // Get the actual pointer
-                    mp_obj_t *ptr = (mp_obj_t *)mp_obj_pointer_get(ptr_obj);
-                    
-                    // Store attribute on dereferenced object
-                    mp_store_attr(*ptr, qst, value);
+                    // Optimized inline extraction: skip function call overhead
+                    if (mp_obj_is_obj(ptr_obj) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(ptr_obj))->type == &mp_type_pointer) {
+                        mp_obj_pointer_t *p = MP_OBJ_TO_PTR(ptr_obj);
+                        mp_obj_t *ptr = (mp_obj_t *)p->addr;
+                        
+                        // Store attribute on dereferenced object
+                        mp_store_attr(*ptr, qst, value);
+                    } else {
+                        mp_raise_TypeError(MP_ERROR_TEXT("expected pointer object"));
+                    }
                     
                     DISPATCH();
                 }

@@ -158,6 +158,7 @@ typedef struct _emit_method_table_t {
     void (*unary_op)(emit_t *emit, mp_unary_op_t op);
     void (*binary_op)(emit_t *emit, mp_binary_op_t op);
     void (*pointer_member_access)(emit_t *emit, qstr member);
+    void (*pointer_deref_stack)(emit_t *emit);
     void (*build)(emit_t *emit, mp_uint_t n_args, int kind);
     void (*store_map)(emit_t *emit);
     void (*store_comp)(emit_t *emit, scope_kind_t kind, mp_uint_t set_stack_index);
@@ -294,6 +295,7 @@ void mp_emit_bc_pointer_assign_local(emit_t *emit, qstr qst, mp_uint_t local_num
 void mp_emit_bc_pointer_assign_global(emit_t *emit, qstr qst, int kind);
 void mp_emit_bc_pointer_member_access(emit_t *emit, qstr member);
 void mp_emit_bc_pointer_member_assign(emit_t *emit, qstr member);
+void mp_emit_bc_pointer_deref_stack(emit_t *emit);
 void mp_emit_bc_build(emit_t *emit, mp_uint_t n_args, int kind);
 void mp_emit_bc_store_map(emit_t *emit);
 void mp_emit_bc_store_comp(emit_t *emit, scope_kind_t kind, mp_uint_t list_stack_index);

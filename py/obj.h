@@ -1039,7 +1039,15 @@ mp_obj_t mp_obj_new_bound_meth(mp_obj_t meth, mp_obj_t self);
 mp_obj_t mp_obj_new_getitem_iter(mp_obj_t *args, mp_obj_iter_buf_t *iter_buf);
 mp_obj_t mp_obj_new_module(qstr module_name);
 mp_obj_t mp_obj_new_memoryview(byte typecode, size_t nitems, void *items);
+
+// Pointer object type definition - used for FFI and pointer arithmetic
+typedef struct _mp_obj_pointer_t {
+    mp_obj_base_t base;
+    intptr_t addr;  // Store the address using intptr_t to preserve full pointer value
+} mp_obj_pointer_t;
+
 mp_obj_t mp_obj_new_pointer(mp_obj_t *addr);
+mp_obj_t mp_obj_new_pointer_fast(mp_obj_t *addr);  // Fast path for temporary arithmetic (no GC pinning)
 mp_obj_t *mp_obj_pointer_get_addr(mp_obj_t ptr);
 mp_obj_t *mp_obj_pointer_get(mp_obj_t ptr);
 

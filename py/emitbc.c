@@ -791,6 +791,12 @@ void mp_emit_bc_pointer_member_access(emit_t *emit, qstr member) {
 void mp_emit_bc_pointer_member_assign(emit_t *emit, qstr member) {
     emit_write_bytecode_byte_qstr(emit, -2, MP_BC_POINTER_MEMBER_ASSIGN, member);
 }
+
+// Stack-based pointer dereference for complex expressions
+void mp_emit_bc_pointer_deref_stack(emit_t *emit) {
+    emit_write_bytecode_byte(emit, 0, MP_BC_POINTER_DEREF_STACK);
+}
+
 void mp_emit_bc_build(emit_t *emit, mp_uint_t n_args, int kind) {
     MP_STATIC_ASSERT(MP_BC_BUILD_TUPLE + MP_EMIT_BUILD_TUPLE == MP_BC_BUILD_TUPLE);
     MP_STATIC_ASSERT(MP_BC_BUILD_TUPLE + MP_EMIT_BUILD_LIST == MP_BC_BUILD_LIST);
@@ -968,6 +974,7 @@ const emit_method_table_t emit_bc_method_table = {
     mp_emit_bc_unary_op,
     mp_emit_bc_binary_op,
     mp_emit_bc_pointer_member_access,
+    mp_emit_bc_pointer_deref_stack,
     mp_emit_bc_build,
     mp_emit_bc_store_map,
     mp_emit_bc_store_comp,

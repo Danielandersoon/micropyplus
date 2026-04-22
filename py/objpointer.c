@@ -4,11 +4,6 @@
 #include <stdio.h>
 #include <stdint.h>
 
-typedef struct _mp_obj_pointer_t {
-    mp_obj_base_t base;
-    intptr_t addr;  // Store the address using intptr_t to preserve full pointer value
-} mp_obj_pointer_t;
-
 // Print function for pointer objects
 static void pointer_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
     (void)kind;
@@ -28,10 +23,9 @@ static mp_obj_t pointer_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t r
     switch (op) {
         case MP_BINARY_OP_ADD:
         case MP_BINARY_OP_INPLACE_ADD: {
-            // ptr + int → new pointer
-            mp_int_t offset = mp_obj_get_int(rhs_in);
-            intptr_t new_addr = lhs_addr + offset;
-            return mp_obj_new_pointer((mp_obj_t *)new_addr);
+            // ptr + int → new pointer (scale offset by element size)
+            intptr_t offset = mp_obj_get_int(rhs_in) * sizeof(mp_obj_t *);
+            return mp_obj_new_pointer((mp_obj_t *)(lhs_addr + offset));
         }
 
         case MP_BINARY_OP_SUBTRACT:
@@ -39,13 +33,11 @@ static mp_obj_t pointer_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t r
             if (mp_obj_is_type(rhs_in, &mp_type_pointer)) {
                 // ptr - ptr → int (difference in bytes)
                 mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
-                intptr_t diff = lhs_addr - rhs->addr;
-                return mp_obj_new_int(diff);
+                return mp_obj_new_int(lhs_addr - rhs->addr);
             } else {
-                // ptr - int → new pointer
-                mp_int_t offset = mp_obj_get_int(rhs_in);
-                intptr_t new_addr = lhs_addr - offset;
-                return mp_obj_new_pointer((mp_obj_t *)new_addr);
+                // ptr - int → new pointer (scale offset by element size)
+                intptr_t offset = mp_obj_get_int(rhs_in) * sizeof(mp_obj_t *);
+                return mp_obj_new_pointer((mp_obj_t *)(lhs_addr - offset));
             }
         }
 
@@ -117,10 +109,23 @@ mp_obj_t mp_obj_new_pointer(mp_obj_t *addr) {
     o->base.type = &mp_type_pointer;
     o->addr = (intptr_t)addr;  // Store the address using intptr_t
     
-    // Pin the pointed-to object if it's a heap object
-    if (addr != NULL && mp_obj_is_obj(*addr)) {
+    // Pin the pointed-to object to prevent GC compaction
+    // Simplified check: skip expensive mp_obj_is_obj() call
+    if (addr != NULL) {
         gc_pin(MP_OBJ_TO_PTR(*addr));
     }
+    return MP_OBJ_FROM_PTR(o);
+}
+
+// Fast pointer creation for temporary arithmetic results (NO GC PINNING)
+// WARNING: Use only for intermediate arithmetic results that are immediately dereferenced
+// Do NOT use for pointers that will be stored or survive GC cycles
+// The caller must ensure the object at addr is pinned elsewhere
+mp_obj_t mp_obj_new_pointer_fast(mp_obj_t *addr) {
+    mp_obj_pointer_t *o = m_new_obj(mp_obj_pointer_t);
+    o->base.type = &mp_type_pointer;
+    o->addr = (intptr_t)addr;
+    // NOTE: Intentionally skipping gc_pin() for speed - safe only for ephemeral arithm
     return MP_OBJ_FROM_PTR(o);
 }
 

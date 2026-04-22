@@ -2711,6 +2711,11 @@ static void emit_native_pointer_member_access(emit_t *emit, qstr member) {
     (void)member;
 }
 
+// Stack-based pointer dereference for complex expressions
+static void emit_native_pointer_deref_stack(emit_t *emit) {
+    (void)emit;
+}
+
 #if MICROPY_PY_BUILTINS_SLICE
 static void emit_native_build_slice(emit_t *emit, mp_uint_t n_args);
 #endif
@@ -3166,6 +3171,7 @@ const emit_method_table_t EXPORT_FUN(method_table) = {
     emit_native_unary_op,
     emit_native_binary_op,
     emit_native_pointer_member_access,
+    emit_native_pointer_deref_stack,
     emit_native_build,
     emit_native_store_map,
     emit_native_store_comp,

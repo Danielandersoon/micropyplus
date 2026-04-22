@@ -2488,8 +2488,13 @@ static void compile_star_expr(compiler_t *comp, mp_parse_node_struct_t *pns) {
             #endif
         }
     } else {
-        // This is unpacking: compile the operand
+        // Complex expression: compile then attempt pointer dereference
+        // If the result is a pointer, it gets dereferenced
+        // If not, it passes through unchanged (for tuple unpacking compatibility)
         compile_node(comp, pn_operand);
+        if (comp->pass != MP_PASS_SCOPE) {
+            EMIT(pointer_deref_stack);
+        }
     }
 }
 
@@ -2530,7 +2535,7 @@ static void compile_factor_2(compiler_t *comp, mp_parse_node_struct_t *pns) {
 }
 
 // Pointer dereference: *ptr
-// Only handles simple identifiers (variables containing pointer objects)
+// Handles both simple identifiers and complex expressions
 static void compile_ptr_deref(compiler_t *comp, mp_parse_node_struct_t *pns) {
     // ptr_deref: '*' factor
     // pns->nodes[0] is the factor
@@ -2551,10 +2556,16 @@ static void compile_ptr_deref(compiler_t *comp, mp_parse_node_struct_t *pns) {
             #endif
         }
     } else {
-        // For complex expressions, just compile the operand without dereferencing
+        // For complex expressions: compile expression then dereference stack value
         compile_node(comp, pns->nodes[0]);
+        if (comp->pass != MP_PASS_SCOPE) {
+            EMIT(pointer_deref_stack);
+        }
     }
 }
+
+// Forward declaration for external bytecode emission function
+void mp_emit_bc_address_of_subscr(emit_t *emit);
 
 // Address-of operator: &obj
 static void compile_ptr_addr_of(compiler_t *comp, mp_parse_node_struct_t *pns) {
@@ -2570,6 +2581,7 @@ static void compile_ptr_addr_of(compiler_t *comp, mp_parse_node_struct_t *pns) {
     mp_parse_node_t pn_operand = get_operand_node(pn_operand_node);
 
     if (MP_PARSE_NODE_IS_ID(pn_operand)) {
+        // Handle simple variable: &var
         qstr qst = MP_PARSE_NODE_LEAF_ARG(pn_operand);
         if (comp->pass == MP_PASS_SCOPE) {
             mp_emit_common_get_id_for_load(comp->scope_cur, qst);
@@ -2580,8 +2592,59 @@ static void compile_ptr_addr_of(compiler_t *comp, mp_parse_node_struct_t *pns) {
             mp_emit_common_id_op(comp->emit, &mp_emit_bc_method_table_address_of_ops, comp->scope_cur, qst);
             #endif
         }
+    } else if (MP_PARSE_NODE_IS_STRUCT(pn_operand)) {
+        // Check if this is atom_expr_normal with subscript trailer: &arr[index]
+        mp_parse_node_struct_t *pn_struct = (mp_parse_node_struct_t *)pn_operand;
+        int kind = MP_PARSE_NODE_STRUCT_KIND(pn_struct);
+        
+        if (kind == PN_atom_expr_normal && !MP_PARSE_NODE_IS_NULL(pn_struct->nodes[1])) {
+            // This is atom_expr with trailers
+            // nodes[0] = atom (e.g., NAME("arr"))
+            // nodes[1] = atom_expr_trailers (e.g., subscript [index])
+            
+            mp_parse_node_t pn_atom = pn_struct->nodes[0];
+            mp_parse_node_t pn_trailers = pn_struct->nodes[1];
+            
+            // For now, only support single subscript trailer: &arr[0]
+            if (MP_PARSE_NODE_IS_STRUCT(pn_trailers)) {
+                // Follow the same pattern as compile_atom_expr_normal for accessing trailers
+                size_t num_trail = 1;
+                mp_parse_node_struct_t **pns_trail = (mp_parse_node_struct_t **)&pn_trailers;
+                if (MP_PARSE_NODE_STRUCT_KIND(pns_trail[0]) == PN_atom_expr_trailers) {
+                    num_trail = MP_PARSE_NODE_STRUCT_NUM_NODES(pns_trail[0]);
+                    pns_trail = (mp_parse_node_struct_t **)&pns_trail[0]->nodes[0];
+                }
+                
+                if (num_trail >= 1) {
+                    mp_parse_node_struct_t *pn_trailer_struct = pns_trail[0];
+                    int trailer_kind = MP_PARSE_NODE_STRUCT_KIND((mp_parse_node_struct_t *)pn_trailer_struct);
+                    
+                    if (trailer_kind == PN_trailer_bracket) {
+                        // This is &arr[index] - compile specially
+                        if (comp->pass == MP_PASS_SCOPE) {
+                            // Analyze the atom and index during SCOPE pass
+                            compile_node(comp, pn_atom);
+                            compile_node(comp, pn_trailer_struct->nodes[0]); // index
+                        } else {
+                            // Emit bytecode during CODE_GEN pass
+                            // Compile base: arr
+                            compile_node(comp, pn_atom);
+                            // Compile index: [0]
+                            compile_node(comp, pn_trailer_struct->nodes[0]);
+                            // Emit: ADDRESS_OF_SUBSCR bytecode
+                            // Stack: [arr, index] -> [ptr_to_element]
+                            mp_emit_bc_address_of_subscr(comp->emit);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        
+        // If we get here, it's some other kind of struct that we can't handle
+        compile_syntax_error(comp, (mp_parse_node_t)pns, MP_ERROR_TEXT("can only take address of variable or subscript"));
     } else {
-        compile_syntax_error(comp, (mp_parse_node_t)pns, MP_ERROR_TEXT("can only take address of variable"));
+        compile_syntax_error(comp, (mp_parse_node_t)pns, MP_ERROR_TEXT("can only take address of variable or subscript"));
     }
 }
 
