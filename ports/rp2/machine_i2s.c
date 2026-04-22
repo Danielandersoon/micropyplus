@@ -596,7 +596,7 @@ static void mp_machine_i2s_deinit(machine_i2s_obj_t *self) {
         pio_deinit(self);
         dma_deinit(self);
         irq_deinit(self);
-        m_free(self->ring_buffer_storage);
+        m_free(self->ring_buffer_storage, self->ring_buffer.size);
         self->pio = NULL;  // flag object as de-initialized
     }
 }

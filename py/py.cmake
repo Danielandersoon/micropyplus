@@ -96,6 +96,7 @@ set(MICROPY_SOURCE_PY
     ${MICROPY_PY_DIR}/objnone.c
     ${MICROPY_PY_DIR}/objobject.c
     ${MICROPY_PY_DIR}/objpolyiter.c
+    ${MICROPY_PY_DIR}/objpointer.c
     ${MICROPY_PY_DIR}/objproperty.c
     ${MICROPY_PY_DIR}/objrange.c
     ${MICROPY_PY_DIR}/objreversed.c

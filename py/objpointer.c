@@ -23,9 +23,8 @@ static mp_obj_t pointer_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t r
     switch (op) {
         case MP_BINARY_OP_ADD:
         case MP_BINARY_OP_INPLACE_ADD: {
-            // ptr + int → new pointer (scale offset by element size)
-            intptr_t offset = mp_obj_get_int(rhs_in) * sizeof(mp_obj_t *);
-            return mp_obj_new_pointer((mp_obj_t *)(lhs_addr + offset));
+            // ptr + int → new pointer
+            return mp_obj_new_pointer((mp_obj_t *)(lhs_addr + mp_obj_get_int(rhs_in)));
         }
 
         case MP_BINARY_OP_SUBTRACT:
@@ -35,9 +34,8 @@ static mp_obj_t pointer_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t r
                 mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
                 return mp_obj_new_int(lhs_addr - rhs->addr);
             } else {
-                // ptr - int → new pointer (scale offset by element size)
-                intptr_t offset = mp_obj_get_int(rhs_in) * sizeof(mp_obj_t *);
-                return mp_obj_new_pointer((mp_obj_t *)(lhs_addr - offset));
+                // ptr - int → new pointer
+                return mp_obj_new_pointer((mp_obj_t *)(lhs_addr - mp_obj_get_int(rhs_in)));
             }
         }
 

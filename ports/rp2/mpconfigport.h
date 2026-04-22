@@ -86,7 +86,7 @@
 #endif
 
 // Memory allocation policies
-#define MICROPY_MALLOC_USES_ALLOCATED_SIZE      (0)
+#define MICROPY_MALLOC_USES_ALLOCATED_SIZE      (1)
 #if MICROPY_HW_ENABLE_PSRAM
 #define MICROPY_GC_STACK_ENTRY_TYPE             uint32_t
 #define MICROPY_ALLOC_GC_STACK_SIZE             (1024) // Avoid slowdown when GC stack overflow causes a full sweep of PSRAM-backed heap
@@ -160,6 +160,7 @@
 #define MICROPY_PY_TIME_TIME_TIME_NS            (1)
 #define MICROPY_PY_TIME_INCLUDEFILE             "ports/rp2/modtime.c"
 #define MICROPY_PY_RANDOM_SEED_INIT_FUNC        (rosc_random_u32())
+#define MICROPY_PY_POINTER                      (1)
 #define MICROPY_PY_MACHINE                      (1)
 #define MICROPY_PY_MACHINE_INCLUDEFILE          "ports/rp2/modmachine.c"
 #define MICROPY_PY_MACHINE_RESET                (1)

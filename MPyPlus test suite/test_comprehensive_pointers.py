@@ -1,8 +1,11 @@
 #!/usr/bin/env micropython
+import gc
 print("----- COMPREHENSIVE POINTER TEST SUITE -----\n")
 
 pass_count = 0
 fail_count = 0
+arr = [100, 200, 300, 400, 500]
+
 
 def test(desc):
     def decorator(func):
@@ -18,6 +21,7 @@ def test(desc):
         except Exception as e:
             print("fail: " + desc + " (Exception: " + str(e) + ")")
             fail_count += 1
+        gc.collect()  # Collect garbage after each test to prevent memory buildup
         return func
     return decorator
 
@@ -154,6 +158,44 @@ def test_cond():
     deref_val = *pval
     return deref_val > 40
 
+@test("Pointer to pointer to pointer")
+def test_triple_ptr():
+    x = 888
+    px = &x
+    ppx = &px
+    pppx = &ppx
+    return *(*(*pppx)) == 888
+
+@test("Pointer arithmetic")
+def test_pointer_arithmetic():
+    x = 10
+    y = 50
+    px = &x
+    py = &y
+    diff = py - px
+    return *(px + diff) == 50
+
+@test("Pointer subscript basic element access")
+def test_pointer_subscript():
+    test_arr = [42]
+    test_ptr = &test_arr[0]
+    # Store dereference result before comparison
+    deref_result = *test_ptr
+    return deref_result == 42
+
+@test("Pointer subscript with positive offset")
+def test_ptr_subscript_offset():
+    arr = [100, 200, 300, 400, 500]
+    ptr = &arr[0]
+    ptr2 = ptr + 24  # 3 elements * 8 bytes each
+    return *ptr2 == 400
+
+@test("Pointer subscript with negative offset")
+def test_ptr_subscript_negative():
+    arr = [100, 200, 300, 400, 500]
+    ptr = &arr[2]
+    return *(ptr - 16) == 100
+    
 # Print summary
 print("\n" + "-"*50)
 print("TOTAL TESTS: " + str(pass_count + fail_count))
