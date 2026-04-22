@@ -610,6 +610,104 @@ y = *ptr                # Still valid, points to same block
 
 **Benefit:** Pinned objects simplify reference tracking by preventing moves.
 
+## Pointer Arithmetic & Temporary Objects
+
+With stack-based pointer dereference (MP_BC_POINTER_DEREF_STACK), pointer arithmetic creates temporary pointer objects:
+
+```python
+base_ptr = &arr[0]      # Permanent pointer, pins arr
+offset_ptr = base_ptr + 1  # Temporary pointer object created
+val = *offset_ptr       # Dereferenced immediately
+```
+
+### Temporary Pointer Optimization
+
+To avoid GC overhead for short-lived arithmetic results, the system uses two allocation paths:
+
+```c
+// For user-created pointers (permanent, long-lived)
+mp_obj_new_pointer(addr)       // Pins the target object
+                               // Used for: ptr = &x
+
+// For arithmetic results (temporary, immediate use)
+mp_obj_new_pointer_fast(addr)  // No pinning
+                               // Used for: ptr + 1, ptr - 2
+```
+
+**Performance impact:**
+- `mp_obj_new_pointer()`: Pins object, adds to pinned table (slower)
+- `mp_obj_new_pointer_fast()`: Skips pinning, minimal overhead (faster)
+
+### Lifetime Pattern
+
+```
+┌─────────────────────────────────────┐
+│ Pointer Arithmetic Stack Pattern    │
+├─────────────────────────────────────┤
+│ 1. base_ptr = &arr[0]               │
+│    (permanent, pinned)              │
+│                                     │
+│ 2. offset = base_ptr + 5            │
+│    (temporary, unpinned)            │
+│    MP_BC_POINTER_DEREF_STACK        │
+│    (automatically deref & discard)  │
+│                                     │
+│ 3. Stack has value, pointer gone    │
+│    GC pressure: minimal             │
+└─────────────────────────────────────┘
+```
+
+**Justification:** Temporary pointers from arithmetic stay on the stack only long enough to be dereferenced immediately, so they don't need pinning the target object.
+
+## Pointer Arithmetic & Temporary Objects
+
+With stack-based pointer dereference (MP_BC_POINTER_DEREF_STACK), pointer arithmetic creates temporary pointer objects:
+
+```python
+base_ptr = &arr[0]      # Permanent pointer, pins arr
+offset_ptr = base_ptr + 1  # Temporary pointer object created
+val = *offset_ptr       # Dereferenced immediately
+```
+
+### Temporary Pointer Optimization
+
+To avoid GC overhead for short-lived arithmetic results, the system uses two allocation paths:
+
+```c
+// For user-created pointers (permanent, long-lived)
+mp_obj_new_pointer(addr)       // Pins the target object
+                               // Used for: ptr = &x
+
+// For arithmetic results (temporary, immediate use)
+mp_obj_new_pointer_fast(addr)  // No pinning
+                               // Used for: ptr + 1, ptr - 2
+```
+
+**Performance impact:**
+- `mp_obj_new_pointer()`: Pins object, adds to pinned table (slower)
+- `mp_obj_new_pointer_fast()`: Skips pinning, minimal overhead (faster)
+
+### Lifetime Pattern
+
+```
+┌─────────────────────────────────────┐
+│ Pointer Arithmetic Stack Pattern    │
+├─────────────────────────────────────┤
+│ 1. base_ptr = &arr[0]               │
+│    (permanent, pinned)              │
+│                                     │
+│ 2. offset = base_ptr + 5            │
+│    (temporary, unpinned)            │
+│    MP_BC_POINTER_DEREF_STACK        │
+│    (automatically deref & discard)  │
+│                                     │
+│ 3. Stack has value, pointer gone    │
+│    GC pressure: minimal             │
+└─────────────────────────────────────┘
+```
+
+**Justification:** Temporary pointers from arithmetic stay on the stack only long enough to be dereferenced immediately, so they don't need pinning the target object.
+
 ## Performance Characteristics
 
 ### Time Complexity

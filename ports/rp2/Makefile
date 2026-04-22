@@ -22,6 +22,11 @@ endif
 $(error Invalid BOARD specified: $(BOARD_DIR))
 endif
 
+# Support VARIANT as an alias for BOARD_VARIANT for consistency with other ports
+ifdef VARIANT
+BOARD_VARIANT ?= $(VARIANT)
+endif
+
 # If the build directory is not given, make it reflect the board name (and
 # optionally the board variant).
 ifneq ($(BOARD_VARIANT),)

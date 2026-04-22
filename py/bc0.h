@@ -120,7 +120,7 @@
 #define MP_BC_POINTER_ASSIGN_GLOBAL         (MP_BC_BASE_VINT_O + 0x0a) // qstr - global variable name, value on stack
 #define MP_BC_POINTER_MEMBER_ASSIGN         (MP_BC_BASE_VINT_O + 0x0b) // qstr - member name, value on stack
 
-#define MP_BC_POINTER_DEREF_STACK           (MP_BC_BASE_BYTE_O + 0x0c) // No inline args - stack: [ptr] -> [value]
+#define MP_BC_POINTER_DEREF_STACK           (MP_BC_BASE_BYTE_O + 0x1c) // No inline args - stack: [ptr] -> [value]
 
 #define MP_BC_DUP_TOP                       (MP_BC_BASE_BYTE_O + 0x07)
 #define MP_BC_DUP_TOP_TWO                   (MP_BC_BASE_BYTE_O + 0x08)

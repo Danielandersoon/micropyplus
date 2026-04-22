@@ -1,10 +1,29 @@
 include ../py/mkenv.mk
 
+# Select the variant to build for:
+ifdef VARIANT_DIR
+# Custom variant path - remove trailing slash and get the final component of
+# the path as the variant name.
+VARIANT ?= $(notdir $(VARIANT_DIR:/=))
+else
+# If not given on the command line, then default to standard.
+VARIANT ?= standard
+VARIANT_DIR ?= variants/$(VARIANT)
+endif
+
+ifeq ($(wildcard $(VARIANT_DIR)/.),)
+$(error Invalid VARIANT specified: $(VARIANT_DIR))
+endif
+
+# Include variant configuration
+include $(VARIANT_DIR)/mpconfigvariant.mk
+
 # define main target
 PROG = mpy-cross
 
 # qstr definitions (must come before including py.mk)
 QSTR_DEFS = qstrdefsport.h
+QSTR_GLOBAL_DEPENDENCIES += $(VARIANT_DIR)/mpconfigvariant.h
 
 # OS name, for simple autoconfig
 UNAME_S := $(shell uname -s)
@@ -15,6 +34,7 @@ include $(TOP)/py/py.mk
 INC += -I.
 INC += -I$(BUILD)
 INC += -I$(TOP)
+INC += -I$(VARIANT_DIR)
 
 # compiler settings
 CWARN = -Wall -Werror

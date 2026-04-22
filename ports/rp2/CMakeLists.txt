@@ -60,6 +60,11 @@ if(NOT PICO_BOARD)
     string(TOLOWER ${MICROPY_BOARD} PICO_BOARD)
 endif()
 
+# Set variant-specific configuration
+if(MICROPY_VARIANT_BACKWARD_COMPATIBLE)
+    set(VARIANT_DEFS "MICROPY_VARIANT_BACKWARD_COMPATIBLE=1")
+endif()
+
 # Set the amount of C heap, if it's not already set.
 # If a board uses malloc then it must set this to at least 4096.
 if(NOT MICROPY_C_HEAP_SIZE)
@@ -580,6 +585,7 @@ set_source_files_properties(
 
 target_compile_definitions(${MICROPY_TARGET} PRIVATE
     ${MICROPY_DEF_BOARD}
+    ${VARIANT_DEFS}
     FFCONF_H=\"${MICROPY_OOFATFS_DIR}/ffconf.h\"
     LFS1_NO_MALLOC LFS1_NO_DEBUG LFS1_NO_WARN LFS1_NO_ERROR LFS1_NO_ASSERT
     LFS2_NO_MALLOC LFS2_NO_DEBUG LFS2_NO_WARN LFS2_NO_ERROR LFS2_NO_ASSERT
