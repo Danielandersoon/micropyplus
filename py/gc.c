@@ -678,7 +678,7 @@ __attribute__((unused))
 static void gc_dump_occupied_blocks(mp_state_mem_area_t *area) {
     #if MICROPY_DEBUG_VERBOSE
     size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
-    DEBUG_printf("\n=== HEAP DUMP AFTER COMPACTION ===\n");
+    printf("\n=== HEAP DUMP AFTER COMPACTION ===\n");
     
     size_t block = 0;
     while (block < max_block) {
@@ -716,12 +716,18 @@ static void gc_dump_occupied_blocks(mp_state_mem_area_t *area) {
 
 void gc_collect_end(void) {
     DEBUG_printf("gc_collect_end: ENTER\n");
+    #if MICROPY_DEBUG_VERBOSE
+    for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
+        gc_dump_occupied_blocks(area);
+        DEBUG_printf("gc_collect_end: starting sweep for area with pool %p..%p\n", area->gc_pool_start, area->gc_pool_end);
+    }
+    #endif
     gc_deal_with_stack_overflow();
     DEBUG_printf("gc_collect_end: dealt with stack overflow\n");
 
     bool compaction_performed = gc_should_compact();
     if (compaction_performed) {
-        #if MICROPY_VARIANT_BACKWARD_COMPATIBLE
+        #if !MICROPY_VARIANT_BACKWARD_COMPATIBLE
         DEBUG_printf("gc_collect_end: starting compaction\n");
         for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
             // Phase 0: Count live objects after sweep and pre-allocate forward table
@@ -747,8 +753,6 @@ void gc_collect_end(void) {
             DEBUG_printf("gc_collect_end: compaction phases complete, freeing forward table\n");           
             gc_forward_table_free(&forward_table);
             
-            // Dump all occupied blocks to see what's in heap after compaction
-            gc_dump_occupied_blocks(area);
             gc_verify_compacted_heap(area);
         }
         #endif
@@ -758,7 +762,6 @@ void gc_collect_end(void) {
     gc_sweep_run_finalisers();
     
     DEBUG_printf("gc_collect_end: freeing blocks (Sweep)\n");
-    gc_sweep_free_blocks();
     
     // Finalize frontiers after the sweep has cleared garbage
     if (compaction_performed) {
@@ -779,6 +782,11 @@ void gc_collect_end(void) {
     MP_STATE_THREAD(gc_lock_depth) &= ~GC_COLLECT_FLAG;
     
     DEBUG_printf("gc_collect_end: EXIT\n");
+    #if MICROPY_DEBUG_VERBOSE
+    for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
+        gc_dump_occupied_blocks(area);
+    }
+    #endif
     GC_EXIT();
 }
 
@@ -846,6 +854,7 @@ static void gc_sweep_run_finalisers(void) {
 }
 
 // Free unmarked heads and their tails
+__attribute__((unused))
 static void gc_sweep_free_blocks(void) {
     #if MICROPY_PY_GC_COLLECT_RETVAL
     MP_STATE_MEM(gc_collected) = 0;

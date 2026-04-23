@@ -277,6 +277,9 @@ void mp_store_name(qstr qst, mp_obj_t obj) {
 void mp_delete_name(qstr qst) {
     DEBUG_OP_printf("delete name %s\n", qstr_str(qst));
     // TODO convert KeyError to NameError if qst not found
+    if (gc_is_pinned(MP_OBJ_FROM_PTR(mp_locals_get()))) {
+        gc_unpin(MP_OBJ_FROM_PTR(mp_locals_get()));
+    }
     mp_obj_dict_delete(MP_OBJ_FROM_PTR(mp_locals_get()), MP_OBJ_NEW_QSTR(qst));
 }
 
