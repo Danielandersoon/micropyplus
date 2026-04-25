@@ -445,6 +445,11 @@ mp_obj_t mp_obj_new_fun_bc(const mp_obj_t *def_args, const byte *code, const mp_
     // Allocate the bytecode function object pinned to prevent GC compaction from moving it
     size_t num_bytes = offsetof(mp_obj_fun_bc_t, extra_args) + sizeof(mp_obj_t) * n_extra_args;
     mp_obj_fun_bc_t *o = (mp_obj_fun_bc_t *)gc_alloc(num_bytes, GC_ALLOC_FLAG_IS_PINNED);
+    
+    // Add to gc_pinned_table so compaction won't move the function object
+    // This ensures code_state.ip pointers into function.bytecode stay valid
+    gc_pin(o);
+    
     o->base.type = &mp_type_fun_bc;
     o->bytecode = code;
     o->context = context;

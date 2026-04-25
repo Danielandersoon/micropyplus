@@ -3,6 +3,7 @@
 #include "py/gc.h"
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 // Print function for pointer objects
 static void pointer_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
@@ -103,15 +104,24 @@ MP_DEFINE_CONST_OBJ_TYPE(
 
 // Create a new pointer object wrapping the given address
 mp_obj_t mp_obj_new_pointer(mp_obj_t *addr) {
+    // CRITICAL: Pin the TARGET object that this pointer points to
+    // When Python code holds a pointer to an object, that object cannot move
+    // during GC or the pointer becomes invalid.
+    // NOTE: We pin only the target, not the pointer object itself.
+    // The pointer object is just a wrapper - as long as the target stays put,
+    // the pointer remains valid (pointers are relative to their target, not stored location)
+    if (addr != NULL && mp_obj_is_obj(*addr)) {
+        gc_pin(*addr);
+    }
+    
+    // Allocate the pointer object itself with normal GC allocation
     mp_obj_pointer_t *o = m_new_obj(mp_obj_pointer_t);
+    if (o == NULL) {
+        return mp_const_none;  // Return None on failure
+    }
     o->base.type = &mp_type_pointer;
     o->addr = (intptr_t)addr;  // Store the address using intptr_t
     
-    // Pin the pointed-to object to prevent GC compaction
-    // Simplified check: skip expensive mp_obj_is_obj() call
-    if (addr != NULL) {
-        gc_pin(MP_OBJ_TO_PTR(*addr));
-    }
     return MP_OBJ_FROM_PTR(o);
 }
 

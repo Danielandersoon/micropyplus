@@ -35,6 +35,7 @@
 #include "py/runtime.h"
 #include "py/bc0.h"
 #include "py/profile.h"
+#include "py/gc.h"
 
 // *FORMAT-OFF*
 
@@ -636,7 +637,12 @@ dispatch_loop:
                     mp_obj_t obj_on_stack = TOP();
                     if (mp_obj_is_obj(obj_on_stack) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(obj_on_stack))->type == &mp_type_pointer) {
                         mp_obj_pointer_t *p = MP_OBJ_TO_PTR(obj_on_stack);
-                        SET_TOP(*(mp_obj_t *)p->addr);
+                        // Validate that the address is within the GC heap before dereferencing
+                        if (p->addr != 0 && gc_is_valid_ptr((void *)p->addr)) {
+                            SET_TOP(*(mp_obj_t *)p->addr);
+                        } else {
+                            mp_raise_ValueError(MP_ERROR_TEXT("pointer address is invalid or freed"));
+                        }
                     }
                     // If not a pointer, leave it as-is (might be iterable for unpacking)
                     DISPATCH();

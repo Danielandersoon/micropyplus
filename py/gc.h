@@ -86,6 +86,7 @@ void *gc_alloc(size_t n_bytes, unsigned int alloc_flags);
 void gc_free(void *ptr); // does not call finaliser
 size_t gc_nbytes(const void *ptr);
 void *gc_realloc(void *ptr, size_t n_bytes, bool allow_move);
+bool gc_is_valid_ptr(const void *ptr); // check if pointer is within GC heap
 
 typedef struct _gc_info_t {
     size_t total;
