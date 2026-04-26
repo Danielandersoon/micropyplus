@@ -210,6 +210,7 @@ typedef struct _mp_module_constants_t {
 typedef struct _mp_module_context_t {
     mp_obj_module_t module;
     mp_module_constants_t constants;
+    size_t obj_table_len;
 } mp_module_context_t;
 
 // Outer level struct defining a compiled module.
@@ -294,6 +295,7 @@ const byte *mp_bytecode_print_str(const mp_print_t *print, const byte *ip_start,
 #define MP_TAGPTR_MAKE(ptr, tag) ((void *)((uintptr_t)(ptr) | (tag)))
 
 static inline void mp_module_context_alloc_tables(mp_module_context_t *context, size_t n_qstr, size_t n_obj) {
+    context->obj_table_len = n_obj;
     #if MICROPY_EMIT_BYTECODE_USES_QSTR_TABLE
     size_t nq = (n_qstr * sizeof(qstr_short_t) + sizeof(mp_uint_t) - 1) / sizeof(mp_uint_t);
     size_t no = n_obj;

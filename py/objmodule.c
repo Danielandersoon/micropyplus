@@ -132,6 +132,7 @@ mp_obj_t mp_obj_new_module(qstr module_name) {
     mp_module_context_t *o = m_new_obj(mp_module_context_t);
     o->module.base.type = &mp_type_module;
     o->module.globals = MP_OBJ_TO_PTR(mp_obj_new_dict(MICROPY_MODULE_DICT_SIZE));
+    o->obj_table_len = 0;
 
     // store __name__ entry in the module
     mp_obj_dict_store(MP_OBJ_FROM_PTR(o->module.globals), MP_OBJ_NEW_QSTR(MP_QSTR___name__), MP_OBJ_NEW_QSTR(module_name));

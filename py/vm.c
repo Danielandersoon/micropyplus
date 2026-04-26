@@ -246,6 +246,7 @@ mp_vm_return_kind_t MICROPY_WRAP_MP_EXECUTE_BYTECODE(mp_execute_bytecode)(mp_cod
 #if MICROPY_OPT_COMPUTED_GOTO
     #include "py/vmentrytable.h"
     #define DISPATCH() do { \
+        /* // OPCODE TRACE: DEBUGGING ONLY */ \
         TRACE(ip); \
         MARK_EXC_IP_GLOBAL(); \
         TRACE_TICK(ip, sp, false); \
@@ -309,6 +310,31 @@ outer_dispatch_loop:
             mp_obj_t obj_shared;
             MICROPY_VM_HOOK_INIT
 
+            // OPCODE TRACE: DEBUGGING ONLY
+            // const byte *trace_bc_base = code_state->fun_bc->bytecode;
+            // qstr trace_fun_name = 0;
+            // bool trace_dangling = false;
+            // size_t trace_steps = 0;
+            //
+            // #if MICROPY_DEBUG_VERBOSE
+            // trace_fun_name = mp_obj_fun_get_name(MP_OBJ_FROM_PTR(code_state->fun_bc));
+            // trace_dangling = strcmp(qstr_str(trace_fun_name), "test_dangling_pointer") == 0;
+            // #endif
+            //
+            // #if MICROPY_DEBUG_VERBOSE
+            // {
+            //     const byte *bc_base = code_state->fun_bc->bytecode;
+            //     size_t ip_ofs = (size_t)(ip - bc_base);
+            //     DEBUG_printf("VM_ENTRY: fun=%p code_state=%p bc_base=%p ip=%p ofs=" UINT_FMT " op=%02x\n",
+            //         code_state->fun_bc, code_state, bc_base, ip, ip_ofs, (unsigned)*ip);
+            //     DEBUG_printf("VM_ENTRY_BYTES:");
+            //     for (size_t bi = 0; bi < 16; ++bi) {
+            //         DEBUG_printf(" %02x", (unsigned)ip[bi]);
+            //     }
+            //     DEBUG_printf("\n");
+            // }
+            // #endif
+
             // If we have exception to inject, now that we finish setting up
             // execution context, raise it. This works as if MP_BC_RAISE_OBJ
             // bytecode was executed.
@@ -366,6 +392,18 @@ dispatch_loop:
 
                 ENTRY(MP_BC_LOAD_CONST_OBJ): {
                     DECODE_OBJ;
+                    // OPCODE TRACE: DEBUGGING ONLY
+                    // if (trace_dangling) {
+                    //     DEBUG_printf("VM_CONST_OBJ: ofs=" UINT_FMT " obj=%p", (size_t)(ip - trace_bc_base), obj);
+                    //     if (mp_obj_is_obj(obj) && gc_is_valid_ptr(MP_OBJ_TO_PTR(obj))) {
+                    //         mp_obj_base_t *o = MP_OBJ_TO_PTR(obj);
+                    //         DEBUG_printf(" type=%p", o->type);
+                    //         if (o->type != NULL && !gc_is_valid_ptr((void *)o->type)) {
+                    //             DEBUG_printf(" tname=%q", o->type->name);
+                    //         }
+                    //     }
+                    //     DEBUG_printf("\n");
+                    // }
                     PUSH(obj);
                     DISPATCH();
                 }
@@ -610,7 +648,7 @@ dispatch_loop:
                     mp_obj_t ptr_obj = fastn[-unum];
                     if (mp_obj_is_obj(ptr_obj) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(ptr_obj))->type == &mp_type_pointer) {
                         mp_obj_pointer_t *p = MP_OBJ_TO_PTR(ptr_obj);
-                        PUSH(*(mp_obj_t *)p->addr);
+                        PUSH(*(mp_obj_t *)MP_POINTER_GET_ADDR(p));
                     } else {
                         mp_raise_TypeError(MP_ERROR_TEXT("expected pointer object"));
                     }
@@ -623,7 +661,7 @@ dispatch_loop:
                     mp_obj_t ptr_obj = mp_load_global(qst);
                     if (mp_obj_is_obj(ptr_obj) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(ptr_obj))->type == &mp_type_pointer) {
                         mp_obj_pointer_t *p = MP_OBJ_TO_PTR(ptr_obj);
-                        PUSH(*(mp_obj_t *)p->addr);
+                        PUSH(*(mp_obj_t *)MP_POINTER_GET_ADDR(p));
                     } else {
                         mp_raise_TypeError(MP_ERROR_TEXT("expected pointer object"));
                     }
@@ -637,9 +675,10 @@ dispatch_loop:
                     mp_obj_t obj_on_stack = TOP();
                     if (mp_obj_is_obj(obj_on_stack) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(obj_on_stack))->type == &mp_type_pointer) {
                         mp_obj_pointer_t *p = MP_OBJ_TO_PTR(obj_on_stack);
+                        intptr_t addr = MP_POINTER_GET_ADDR(p);
                         // Validate that the address is within the GC heap before dereferencing
-                        if (p->addr != 0 && gc_is_valid_ptr((void *)p->addr)) {
-                            SET_TOP(*(mp_obj_t *)p->addr);
+                        if (addr != 0 && gc_is_valid_ptr((void *)addr)) {
+                            SET_TOP(*(mp_obj_t *)addr);
                         } else {
                             mp_raise_ValueError(MP_ERROR_TEXT("pointer address is invalid or freed"));
                         }
@@ -654,7 +693,7 @@ dispatch_loop:
                     mp_obj_t ptr_obj = TOP();
                     if (mp_obj_is_obj(ptr_obj) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(ptr_obj))->type == &mp_type_pointer) {
                         mp_obj_pointer_t *p = MP_OBJ_TO_PTR(ptr_obj);
-                        SET_TOP(mp_load_attr(*(mp_obj_t *)p->addr, qst));
+                        SET_TOP(mp_load_attr(*(mp_obj_t *)MP_POINTER_GET_ADDR(p), qst));
                     } else {
                         mp_raise_TypeError(MP_ERROR_TEXT("expected pointer object"));
                     }
@@ -678,7 +717,7 @@ dispatch_loop:
                     // Optimized inline extraction: skip function call overhead
                     if (mp_obj_is_obj(ptr_obj) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(ptr_obj))->type == &mp_type_pointer) {
                         mp_obj_pointer_t *p = MP_OBJ_TO_PTR(ptr_obj);
-                        mp_obj_t *ptr = (mp_obj_t *)p->addr;
+                        mp_obj_t *ptr = (mp_obj_t *)MP_POINTER_GET_ADDR(p);
                         
                         
                         // Check if pointer is NULL or points to invalid location
@@ -711,7 +750,7 @@ dispatch_loop:
                     
                     if (mp_obj_is_obj(ptr_obj) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(ptr_obj))->type == &mp_type_pointer) {
                         mp_obj_pointer_t *p = MP_OBJ_TO_PTR(ptr_obj);
-                        mp_obj_t *ptr = (mp_obj_t *)p->addr;
+                        mp_obj_t *ptr = (mp_obj_t *)MP_POINTER_GET_ADDR(p);
                         
                         // Get value from stack
                         mp_obj_t value = POP();
@@ -742,7 +781,7 @@ dispatch_loop:
                     // Optimized inline extraction: skip function call overhead
                     if (mp_obj_is_obj(ptr_obj) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(ptr_obj))->type == &mp_type_pointer) {
                         mp_obj_pointer_t *p = MP_OBJ_TO_PTR(ptr_obj);
-                        mp_obj_t *ptr = (mp_obj_t *)p->addr;
+                        mp_obj_t *ptr = (mp_obj_t *)MP_POINTER_GET_ADDR(p);
                         
                         // Store attribute on dereferenced object
                         mp_store_attr(*ptr, qst, value);
@@ -1172,6 +1211,27 @@ unwind_jump:;
                     // unum & 0xff == n_positional
                     // (unum >> 8) & 0xff == n_keyword
                     sp -= (unum & 0xff) + ((unum >> 7) & 0x1fe);
+                    // OPCODE TRACE: DEBUGGING ONLY
+                    // if (trace_dangling) {
+                    //     mp_uint_t n_pos = unum & 0xff;
+                    //     mp_uint_t n_kw = (unum >> 8) & 0xff;
+                    //     DEBUG_printf("VM_CALL: ofs=" UINT_FMT " fun_obj=%p n_pos=" UINT_FMT " n_kw=" UINT_FMT,
+                    //         (size_t)(ip - trace_bc_base), *sp, n_pos, n_kw);
+                    //     if (n_pos > 0) {
+                    //         mp_obj_t a0 = sp[1];
+                    //         DEBUG_printf(" arg0=%p", a0);
+                    //         if (mp_obj_is_obj(a0) && gc_is_valid_ptr(MP_OBJ_TO_PTR(a0))) {
+                    //             mp_obj_base_t *a0_obj = MP_OBJ_TO_PTR(a0);
+                    //             DEBUG_printf(" arg0_type=%p", a0_obj->type);
+                    //             if (a0_obj->type != NULL && !gc_is_valid_ptr((void *)a0_obj->type)) {
+                    //                 DEBUG_printf(" arg0_tname=%q", a0_obj->type->name);
+                    //             }
+                    //         } else {
+                    //             DEBUG_printf(" arg0_nonobj_or_nonheap");
+                    //         }
+                    //     }
+                    //     DEBUG_printf("\n");
+                    // }
                     #if MICROPY_STACKLESS
                     if (mp_obj_get_type(*sp) == &mp_type_fun_bc) {
                         code_state->ip = ip;
@@ -1196,8 +1256,12 @@ unwind_jump:;
                         }
                     }
                     #endif
+                        { ptrdiff_t _ip_ofs = ip - code_state->fun_bc->bytecode;
                     SET_TOP(mp_call_function_n_kw(*sp, unum & 0xff, (unum >> 8) & 0xff, sp + 1));
-                    DISPATCH();
+                        // GC compaction during the call may have moved the bytecode buffer.
+                        // fun_bc is pinned and its ->bytecode field is updated by gc_update_references.
+                        ip = code_state->fun_bc->bytecode + _ip_ofs; }
+                        DISPATCH();
                 }
 
                 ENTRY(MP_BC_CALL_FUNCTION_VAR_KW): {
@@ -1242,8 +1306,10 @@ unwind_jump:;
                         }
                     }
                     #endif
+                        { ptrdiff_t _ip_ofs = ip - code_state->fun_bc->bytecode;
                     SET_TOP(mp_call_method_n_kw_var(false, unum, sp));
-                    DISPATCH();
+                        ip = code_state->fun_bc->bytecode + _ip_ofs; }
+                        DISPATCH();
                 }
 
                 ENTRY(MP_BC_CALL_METHOD): {
@@ -1281,8 +1347,10 @@ unwind_jump:;
                         }
                     }
                     #endif
+                        { ptrdiff_t _ip_ofs = ip - code_state->fun_bc->bytecode;
                     SET_TOP(mp_call_method_n_kw(unum & 0xff, (unum >> 8) & 0xff, sp));
-                    DISPATCH();
+                        ip = code_state->fun_bc->bytecode + _ip_ofs; }
+                        DISPATCH();
                 }
 
                 ENTRY(MP_BC_CALL_METHOD_VAR_KW): {
@@ -1327,8 +1395,10 @@ unwind_jump:;
                         }
                     }
                     #endif
+                        { ptrdiff_t _ip_ofs = ip - code_state->fun_bc->bytecode;
                     SET_TOP(mp_call_method_n_kw_var(true, unum, sp));
-                    DISPATCH();
+                        ip = code_state->fun_bc->bytecode + _ip_ofs; }
+                        DISPATCH();
                 }
 
                 ENTRY(MP_BC_RETURN_VALUE):

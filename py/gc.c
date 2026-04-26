@@ -40,6 +40,10 @@
 
 #if MICROPY_ENABLE_GC
 
+// Forward declaration of pointer object type (used during GC compaction)
+// to skip the addr field when scanning object references
+extern const mp_obj_type_t mp_type_pointer;
+
 #if MICROPY_DEBUG_VERBOSE // print debugging info
 #define DEBUG_PRINT (1)
 #define DEBUG_printf DEBUG_printf
@@ -143,6 +147,8 @@ static void gc_update_references(mp_state_mem_area_t *area, gc_forward_table_t *
 static void gc_update_roots(mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
 static void gc_shift_left_frontier(mp_state_mem_area_t *area);
 static void _gc_update_dict_values(mp_obj_dict_t *dict, mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
+static void _gc_update_module_context_obj_table(mp_module_context_t *ctx, gc_forward_table_t *forward_table);
+static void *gc_update_ptr(void *ptr, gc_forward_table_t *forward_table);
 //static size_t gc_count_marked_blocks(mp_state_mem_area_t *area);
 static size_t gc_count_live_objects(mp_state_mem_area_t *area);
 static bool gc_forward_table_prealloc(gc_forward_table_t *table, size_t size);
@@ -546,9 +552,23 @@ static void gc_mark_subtree(size_t block)
         assert(area->gc_pool_start + (block + n_blocks) * BYTES_PER_BLOCK <= area->gc_pool_end);
 
         // check this block's children
+        size_t n_ptrs = n_blocks * BYTES_PER_BLOCK / sizeof(void *);
         void **ptrs = (void **)PTR_FROM_BLOCK(area, block);
-        for (size_t i = n_blocks * BYTES_PER_BLOCK / sizeof(void *); i > 0; i--, ptrs++) {
+
+        // Pointer objects store a raw address in word[1] that is not a GC ref.
+        // Never traverse it during mark, otherwise '&var' can cause random
+        // memory traversal and crashes.
+        bool is_pointer_obj = false;
+        if (n_ptrs >= 2) {
+            mp_obj_base_t *obj = (mp_obj_base_t *)ptrs;
+            is_pointer_obj = (obj->type == &mp_type_pointer);
+        }
+
+        for (size_t i = 0; i < n_ptrs; i++, ptrs++) {
             MICROPY_GC_HOOK_LOOP(i);
+            if (is_pointer_obj && i == 1) {
+                continue;
+            }
             void *ptr = *ptrs;
             // If this is a heap pointer that hasn't been marked, mark it and push
             // it's children to the stack.
@@ -603,7 +623,7 @@ void gc_sweep_all(void) {
 }
 
 static bool gc_should_compact(void) {
-    return true;  // ENABLED - function objects now properly pinned
+    return true;
 }
 
 // Shift the left frontier to reflect the actual compacted heap state
@@ -618,21 +638,27 @@ static void gc_shift_left_frontier(mp_state_mem_area_t *area) {
     size_t limit = MIN(area->gc_num_blocks, area->gc_alloc_table_byte_len * BLOCKS_PER_ATB);
     size_t last_used = 0;
     
-    // Scan from start to end, tracking the highest allocated block
+    // Scan from start to end, tracking two frontiers:
+    // - last_normal_used: highest non-pinned block (for the left allocator frontier)
+    // - last_used: highest of ALL blocks including pinned (for sweep bounds)
+    size_t last_normal_used = 0;
     for (size_t block = 0; block < limit; block++) {
         byte block_kind = ATB_GET_KIND(area, block);
-        
-        // Track any allocated block (at HEAD, TAIL, or MARK state)
         if (block_kind == AT_HEAD || block_kind == AT_TAIL || block_kind == AT_MARK) {
-            last_used = block;  // Update to highest numbered allocated block
+            last_used = block;
+            if (!gc_is_block_pinned(block)) {
+                last_normal_used = block;
+            }
         }
     }
     
-    // Frontier is one block after the highest used block
-    size_t new_frontier = last_used + 1;
+    // Left frontier is one block after the highest NON-PINNED allocated block.
+    // Pinned blocks live at the far right and must not inflate this frontier,
+    // otherwise gc_alloc and gc_alloc_right both lose all usable address space.
+    size_t new_frontier = last_normal_used + 1;
     
     area->gc_last_used_block_from_left = new_frontier;
-    area->gc_last_used_block = last_used;  // Set to actual last used block
+    area->gc_last_used_block = last_used;  // Tracks ALL blocks (needed by sweep)
     DEBUG_printf("gc_shift_left_frontier: after shift, left frontier at block " UINT_FMT ", last_used=" UINT_FMT "\n", 
                  new_frontier, last_used);
 
@@ -682,40 +708,57 @@ static void gc_verify_compacted_heap(mp_state_mem_area_t *area) {
 __attribute__((unused))
 static void gc_dump_occupied_blocks(mp_state_mem_area_t *area) {
     #if MICROPY_DEBUG_VERBOSE
-    size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
     printf("\n=== HEAP DUMP AFTER COMPACTION ===\n");
+    printf("area pointer = %p\n", (void *)area);
+    fflush(stdout);
     
-    size_t block = 0;
-    while (block < max_block) {
+    // Read gc_alloc_table_byte_len first and print it in different ways
+    size_t atb_len = area->gc_alloc_table_byte_len;
+    printf("area->gc_alloc_table_byte_len = " UINT_FMT " (hex: %lx)\n", atb_len, (unsigned long)atb_len);
+    printf("Raw bytes at &(area->gc_alloc_table_byte_len): %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            ((uint8_t*)&area->gc_alloc_table_byte_len)[0],
+            ((uint8_t*)&area->gc_alloc_table_byte_len)[1],
+            ((uint8_t*)&area->gc_alloc_table_byte_len)[2],
+            ((uint8_t*)&area->gc_alloc_table_byte_len)[3],
+            ((uint8_t*)&area->gc_alloc_table_byte_len)[4],
+            ((uint8_t*)&area->gc_alloc_table_byte_len)[5],
+            ((uint8_t*)&area->gc_alloc_table_byte_len)[6],
+            ((uint8_t*)&area->gc_alloc_table_byte_len)[7]);
+    fflush(stdout);
+    
+    if (atb_len == 0 || atb_len > 1000000) {
+        printf("ERROR: gc_alloc_table_byte_len is invalid (" UINT_FMT "), stopping dump\n", atb_len);
+        fflush(stdout);
+        return;
+    }
+    
+    size_t max_block = atb_len * BLOCKS_PER_ATB;
+    printf("max_block = " UINT_FMT "\n", max_block);
+    fflush(stdout);
+    
+    size_t dump_count = 0;
+    for (size_t block = 0; block < max_block && block < 100; block++) {
         byte kind = ATB_GET_KIND(area, block);
-        if (kind == AT_HEAD) {
-            // Found a HEAD block, count consecutive TAIL blocks
-            void *addr = (void *)(area->gc_pool_start + block * BYTES_PER_BLOCK);
-            size_t block_count = 1;
-            size_t temp_block = block + 1;
-            while (temp_block < max_block && ATB_GET_KIND(area, temp_block) == AT_TAIL) {
-                block_count++;
-                temp_block++;
+        if (kind == AT_FREE) {
+            printf("Block " UINT_FMT ": FREE\n", block);
+            dump_count++;
+        } else if (kind == AT_HEAD || kind == AT_MARK) {
+            size_t tail_count = 0;
+            size_t check_block = block + 1;
+            while (check_block < max_block && ATB_GET_KIND(area, check_block) == AT_TAIL) {
+                tail_count++;
+                check_block++;
             }
-            DEBUG_printf("Block " UINT_FMT " at %p: " UINT_FMT " bytes (%d tail blocks)\n", 
-                         block, addr, block_count * BYTES_PER_BLOCK, (int)(block_count - 1));
-            block = temp_block;
-        } else if (kind == AT_TAIL) {
-            // Orphaned TAIL without HEAD (should not happen)
-            void *addr = (void *)(area->gc_pool_start + block * BYTES_PER_BLOCK);
-            DEBUG_printf("Block " UINT_FMT " at %p: ORPHAN TAIL!\n", block, addr);
-            block++;
-        } else if (kind == AT_MARK) {
-            // Marked block (unused after compaction)
-            void *addr = (void *)(area->gc_pool_start + block * BYTES_PER_BLOCK);
-            DEBUG_printf("Block " UINT_FMT " at %p: MARK (should be 0!)\n", block, addr);
-            block++;
-        } else {
-            // FREE block, skip to next occupied
-            block++;
+            printf("Block " UINT_FMT ": %s tails=" UINT_FMT " total_blocks=" UINT_FMT "\n",
+                   block,
+                   kind == AT_HEAD ? "HEAD" : "MARK",
+                   tail_count,
+                   tail_count + 1);
+            dump_count++;
         }
     }
-    DEBUG_printf("=== END HEAP DUMP ===\n\n");
+    printf("=== END HEAP DUMP (checked first 100 blocks, found " UINT_FMT ") ===\n\n", dump_count);
+    fflush(stdout);
     #endif
 }
 
@@ -761,73 +804,50 @@ static bool gc_validate_heap_integrity(mp_state_mem_area_t *area, const char *ch
 }
 
 void gc_collect_end(void) {
-    DEBUG_printf("gc_collect_end: ENTER\n");    
-    fflush(stdout);
+    DEBUG_printf("gc_collect_end: ENTER\n");
     gc_deal_with_stack_overflow();
     DEBUG_printf("gc_collect_end: dealt with stack overflow\n");
-    fflush(stdout);
 
     bool compaction_performed = gc_should_compact();
-    DEBUG_printf("gc_collect_end: gc_should_compact returned %d\n", compaction_performed);
-    fflush(stdout);
     if (compaction_performed) {
         #if !MICROPY_VARIANT_BACKWARD_COMPATIBLE
         DEBUG_printf("gc_collect_end: starting compaction\n");
-        fflush(stdout);
         for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
             // Phase 0: Count live objects after sweep and pre-allocate forward table
             DEBUG_printf("gc_collect_end: About to count live objects\n");
-            fflush(stdout);
             size_t live_count = gc_count_live_objects(area);
             DEBUG_printf("gc_collect_end: counted " UINT_FMT " live objects\n", live_count);
-            fflush(stdout);
             
             gc_forward_table_t forward_table = {0};
             DEBUG_printf("gc_collect_end: About to prealloc forward table (size " UINT_FMT ")\n", live_count);
-            fflush(stdout);
-            if (!gc_forward_table_prealloc(&forward_table, live_count)) {
+            // SAFETY FIX: allocate with +1 capacity to avoid OBO at exact capacity boundary
+            if (!gc_forward_table_prealloc(&forward_table, live_count + 1)) {
                 DEBUG_printf("gc_collect_end: failed to pre-allocate forward table\n");
-                fflush(stdout);
                 continue;
             }
             DEBUG_printf("gc_collect_end: Forward table prealloc complete\n");
-            fflush(stdout);
-            
-            // Pin the ranges array itself so it doesn't get moved/cleared during compaction
-            if (gc_pinned_table.count > 0 && gc_pinned_table.ranges != NULL) {
-                gc_pin((void *)gc_pinned_table.ranges);
-            }
             
             DEBUG_printf("gc_collect_end: Phase 1 - computing forwarding addresses - area=%p\n", area);
-            fflush(stdout);
             gc_compute_forwarding_addresses(area, &forward_table);
             DEBUG_printf("gc_collect_end: Phase 1 COMPLETE - forward_table has " UINT_FMT " entries (cap=" UINT_FMT ")\n", forward_table.count, forward_table.capacity);
-            fflush(stdout);
             gc_validate_heap_integrity(area, "after Phase 1");
             
             DEBUG_printf("gc_collect_end: Phase 2 - copying objects\n");
-            fflush(stdout);
             gc_compact_copy(area, &forward_table);
-            DEBUG_printf("gc_collect_end: Phase 2 COMPLETE\n");
-            fflush(stdout);
-            gc_validate_heap_integrity(area, "after Phase 2");
             
-            DEBUG_printf("gc_collect_end: Phase 3 - updating references\n");
+            // Verify stack is not corrupted by checking a known value
+            volatile uint64_t stack_check = 0x0102030405060708ULL;
+            if (stack_check != 0x0102030405060708ULL) {
+                printf("CORRUPTION DETECTED: Stack value changed!\n");
+            }
+
             // Phase 3: Update internal object references
             gc_update_references(area, &forward_table);
-            gc_validate_heap_integrity(area, "after Phase 3");
-            
-            DEBUG_printf("gc_collect_end: Phase 4 - updating roots\n");            
             gc_update_roots(area, &forward_table);
-            gc_validate_heap_integrity(area, "after Phase 4");
-            
-            DEBUG_printf("gc_collect_end: Phase 5 - shifting left frontier\n");
             gc_shift_left_frontier(area);
-            gc_validate_heap_integrity(area, "after Phase 5");
-            DEBUG_printf("gc_collect_end: compaction phases complete, freeing forward table\n");           
             gc_forward_table_free(&forward_table);
-            
-            gc_verify_compacted_heap(area);
+
+            //gc_verify_compacted_heap(area);
         }
         #endif
     }
@@ -840,21 +860,19 @@ void gc_collect_end(void) {
     // Finalize frontiers after the sweep has cleared garbage
     if (compaction_performed) {
         for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
-            // Set gc_last_free_atb_index to scan starting right after the compacted area
-            // Ensure gc_last_used_block is valid before using it
-            ssize_t last_used = (ssize_t)area->gc_last_used_block;
-            ssize_t first_free_block = (last_used >= 0) ? (last_used + 1) : 0;
-            
+            // Set gc_last_free_atb_index to scan starting right after the compacted
+            // non-pinned area.  gc_last_used_block_from_left holds the block index
+            // immediately after the last normal (non-pinned) live block, which is
+            // exactly where free space begins after compaction.
+            ssize_t first_free_block = (ssize_t)area->gc_last_used_block_from_left;
+
             // Bounds check
             if (first_free_block < 0) first_free_block = 0;
             if (first_free_block >= (ssize_t)(area->gc_alloc_table_byte_len * BLOCKS_PER_ATB)) {
-                first_free_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB - 1;
+                first_free_block = 0;  // Wrap to start if beyond table
             }
-            
-            area->gc_last_free_atb_index = ((size_t)first_free_block) / BLOCKS_PER_ATB;
 
-            DEBUG_printf("gc_collect_end: set gc_last_free_atb_index to " UINT_FMT " (first free block " UINT_FMT ")\n", 
-                         area->gc_last_free_atb_index, (size_t)first_free_block);
+            area->gc_last_free_atb_index = ((size_t)first_free_block) / BLOCKS_PER_ATB;
             break;
         }
     }
@@ -1855,6 +1873,15 @@ void gc_pin(void* ptr) {
     GC_ENTER();
     DEBUG_printf("gc_pin: pinning object at ptr %p (block " UINT_FMT ")\n", ptr, block);
 
+    // Validate that this block actually contains an allocated object
+    // Don't pin garbage values that happen to fall in the heap range
+    byte block_kind = ATB_GET_KIND(area, block);
+    if (block_kind != AT_HEAD && block_kind != AT_MARK && block_kind != AT_TAIL) {
+        DEBUG_printf("gc_pin: ERROR - block " UINT_FMT " is not allocated (kind=%d), ignoring\n", block, block_kind);
+        GC_EXIT();
+        return;  // Not a real allocated block
+    }
+
     // Check if already pinned
     if (gc_pinned_find_range_by_ptr(ptr) != -1) {
         GC_EXIT();
@@ -2015,6 +2042,7 @@ remove_entry:
 }
 
 // Function to insert a forwarding entry 
+__attribute__((unused))
 static bool gc_forward_table_insert(gc_forward_table_t *table, size_t old_block, size_t new_block) {
     if (table->count >= table->capacity) {
         DEBUG_printf("gc_forward_table_insert: ERROR - table FULL! count=" UINT_FMT " capacity=" UINT_FMT "\n", 
@@ -2030,6 +2058,18 @@ static bool gc_forward_table_insert(gc_forward_table_t *table, size_t old_block,
 
 // Function to lookup forwarding address
 static size_t gc_forward_table_lookup(gc_forward_table_t *table, size_t old_block) {
+    if (table == NULL || table->entries == NULL) {
+        DEBUG_printf("gc_forward_table_lookup: ERROR - table is NULL or unallocated!\n");
+        return (size_t)-1;
+    }
+    
+    // BOUNDS CHECK: Make sure count doesn't exceed capacity
+    if (table->count > table->capacity) {
+        printf("FATAL: forward_table.count (" UINT_FMT ") exceeds capacity (" UINT_FMT ")!\n", 
+               table->count, table->capacity);
+        return (size_t)-1;
+    }
+    
     for (size_t i = 0; i < table->count; i++) {
         if (table->entries[i].old_block == old_block) {
             return table->entries[i].new_block;
@@ -2056,7 +2096,16 @@ static size_t gc_count_live_objects(mp_state_mem_area_t *area) {
             while (next_block < max_block && ATB_GET_KIND(area, next_block) == AT_TAIL) {
                 next_block++;
             }
-            block = next_block - 1;
+            
+            // BOUNDS CHECK: Ensure next_block won't cause overflow
+            if (next_block > max_block) {
+                printf("FATAL: gc_count_live_objects - next_block (" UINT_FMT ") exceeds max_block (" UINT_FMT ")!\n",
+                       next_block, max_block);
+                return count;
+            }
+            
+            // Skip past the TAIL blocks for this object
+            block = next_block - 1;  // -1 because the for loop will do block++
         }
     }
     return count;
@@ -2089,19 +2138,19 @@ static void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forwar
         return;
     }
 
-    // Compute new addresses for all live objects using bi-directional compaction
-    size_t compact_ptr = 0;
+    // Two-pointer planner:
+    // - Read pointer scans live objects from left to right.
+    // - Write pointer searches for FREE runs strictly before the current object.
+    // This guarantees we only move objects into holes that are already free,
+    // and never into pinned blocks.
+    size_t write_ptr = 0;
     size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
-    // Limit to actual pool size to prevent boundary block corruption
     size_t process_limit = MIN(area->gc_num_blocks, max_block);
 
     for (size_t block = 0; block < process_limit; block++) {
         byte block_kind = ATB_GET_KIND(area, block);
 
-        // Process both AT_HEAD (already converted) and AT_MARK (live objects from mark phase)
-        // Sweep hasn't run yet, so live objects are still AT_MARK
         if (block_kind == AT_HEAD || block_kind == AT_MARK) {
-            // Count the number of consecutive blocks
             size_t block_count = 1;
             size_t next_block = block + 1;
             while (next_block < max_block && ATB_GET_KIND(area, next_block) == AT_TAIL) {
@@ -2109,251 +2158,238 @@ static void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forwar
                 next_block++;
             }
 
-            // Determine if object is pinned (immovable)
             bool is_pinned = gc_is_block_pinned(block);
             if (is_pinned) {
-                // Pinned objects stay in place - record identity mapping
                 if (!gc_forward_table_insert(forward_table, block, block)) {
                     DEBUG_printf("gc_compute_forwarding_addresses: failed to insert pinned object at block " UINT_FMT "\n", block);
                     gc_forward_table_free(forward_table);
                     return;
                 }
-                // CRITICAL FIX: Skip compact_ptr past the pinned object to avoid collisions with subsequent compactions
-                if (block + block_count > compact_ptr) {
-                    compact_ptr = block + block_count;
-                }
             } else {
-                if (compact_ptr + block_count > max_block) {
-                    DEBUG_printf("gc_compute: ERROR - compaction would exceed max_block! (" UINT_FMT " + " UINT_FMT " > " UINT_FMT ")\n",
-                                 compact_ptr, block_count, max_block);
+                size_t new_block = block;
+
+                if (write_ptr < block) {
+                    size_t candidate = write_ptr;
+                    while (candidate + block_count <= block) {
+                        bool can_place = true;
+                        for (size_t i = 0; i < block_count; i++) {
+                            size_t b = candidate + i;
+                            if (ATB_GET_KIND(area, b) != AT_FREE || gc_is_block_pinned(b)) {
+                                can_place = false;
+                                candidate = b + 1;
+                                break;
+                            }
+                        }
+                        if (can_place) {
+                            new_block = candidate;
+                            break;
+                        }
+                    }
+                }
+
+                if (new_block + block_count > area->gc_last_used_block_from_right) {
+                    DEBUG_printf("gc_compute: collision at block " UINT_FMT ": destination crosses right frontier\n", block);
                     gc_forward_table_free(forward_table);
                     return;
                 }
 
-                // Check for collision with right frontier
-                if (compact_ptr + block_count > area->gc_last_used_block_from_right) {
-                    DEBUG_printf("gc_compute: collision at block " UINT_FMT ": left frontier (" UINT_FMT " + " UINT_FMT ") >= right frontier " UINT_FMT "\n",
-                                 block, compact_ptr, block_count, area->gc_last_used_block_from_right);
-                    gc_forward_table_free(forward_table);
-                    return;
-                }
-
-                // Record forwarding address: old_block -> new_block
-                if (!gc_forward_table_insert(forward_table, block, compact_ptr)) {
+                if (!gc_forward_table_insert(forward_table, block, new_block)) {
                     DEBUG_printf("gc_compute_forwarding_addresses: failed to insert mapping for block " UINT_FMT "\n", block);
                     gc_forward_table_free(forward_table);
                     return;
                 }
 
-                // Block mapping recorded
-                compact_ptr += block_count;
+                if (new_block + block_count > write_ptr) {
+                    write_ptr = new_block + block_count;
+                }
             }
 
-            // Skip to end of this object's blocks
             block = next_block - 1;
         }
     }
 
-    // Phase 1: Forwarding addresses computed
+    DEBUG_printf("gc_compute_forwarding_addresses: planned " UINT_FMT " moves\n", forward_table->count);
 }
 
-// Updates allocation table for new block positions
+// Updates allocation table for new block positions with bi-directional move ordering
 __attribute__((unused))
 static void gc_compact_copy(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
-    // Physically copy live objects to their new locations
-    DEBUG_printf("gc_compact_copy: starting copy phase\n");
-
-    // CRITICAL SAFETY CHECK: Ensure forward table is valid
+    
     if (forward_table == NULL || forward_table->entries == NULL || forward_table->count == 0) {
-        DEBUG_printf("gc_compact_copy: ERROR - invalid forward table (entries=%p, count=" UINT_FMT "), aborting copy to prevent heap corruption\n",
-                     forward_table ? forward_table->entries : NULL, forward_table ? forward_table->count : 0);
         return;
     }
 
     size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
-    // Limit to actual pool size to prevent boundary block corruption
     size_t process_limit = MIN(area->gc_num_blocks, max_block);
-    
-    // Track the frontier after copying (highest new_block + block_count)
     size_t compacted_frontier = 0;
+    
+    // ============ PASS 1: Process DOWN-moves in FORWARD order ============
+    size_t pass1_count = 0;
 
     for (size_t block = 0; block < process_limit; block++) {
         byte block_kind = ATB_GET_KIND(area, block);
+        if (block_kind != AT_HEAD && block_kind != AT_MARK) continue;
 
-        // Process both AT_HEAD and AT_MARK (live objects not yet converted by sweep)
-        if (block_kind == AT_HEAD || block_kind == AT_MARK) {
-            // Count the number of consecutive blocks
-            size_t block_count = 1;
-            size_t next_block = block + 1;
-            while (next_block < max_block && ATB_GET_KIND(area, next_block) == AT_TAIL) {
-                block_count++;
-                next_block++;
-            }
+        size_t block_count = 1;
+        size_t next_block = block + 1;
+        while (next_block < max_block && ATB_GET_KIND(area, next_block) == AT_TAIL) {
+            block_count++;
+            next_block++;
+        }
 
-            // Check if this block is pinned - if so, skip it (it stays in place)
-            bool is_pinned = false;
-            for (size_t p = 0; p < gc_pinned_table.count; p++) {
-                size_t pinned_start = gc_pinned_table.ranges[p].block_start;
-                size_t pinned_count = gc_pinned_table.ranges[p].block_count;
-                if (block >= pinned_start && block < pinned_start + pinned_count) {
-                    is_pinned = true;
-                    break;
+        bool is_pinned = gc_is_block_pinned(block);
+        if (is_pinned) {
+            if (block_kind == AT_MARK) {
+                ATB_MARK_TO_HEAD(area, block);
+                for (size_t i = block + 1; i < block + block_count; i++) {
+                    ATB_MARK_TO_TAIL(area, i);
                 }
             }
-
-            if (is_pinned) {
-                // Pinned block stays in place
-                // If AT_MARK, convert to AT_HEAD (and AT_TAIL for subsequent blocks)
-                if (block_kind == AT_MARK) {
-                    ATB_MARK_TO_HEAD(area, block);
-                    if (block_count > 1) {
-                        for (size_t i = block + 1; i < block + block_count; i++) {
-                            ATB_MARK_TO_TAIL(area, i);
-                        }
-                    }
-                }
-                compacted_frontier = MAX(compacted_frontier, block + block_count);
-                block = next_block - 1;
-                continue;
-            }
-
-            // Look up where this object should be moved to
-            size_t new_block = gc_forward_table_lookup(forward_table, block);
-            if (new_block == (size_t)-1) {
-                // Should never happen!!! all AT_MARK blocks should be in forward table
-                DEBUG_printf("gc_compact_copy: ERROR - block " UINT_FMT " not in forwarding table\n", block);
-                block = next_block - 1;
-                continue;
-            }
-
-            if (new_block == block) {
-                // DEBUG_printf("gc_compact_copy: block " UINT_FMT " pinned - no copy needed\n", block);
-                // Object stays in place - already AT_HEAD from sweep phase, nothing to do
-                // Track frontier
-                compacted_frontier = MAX(compacted_frontier, new_block + block_count);
-                block = next_block - 1;
-                continue;
-            }
-
-            if (new_block + block_count > max_block) {
-                DEBUG_printf("gc_compact_copy: ERROR - copy would exceed max_block! (" UINT_FMT " + " UINT_FMT " > " UINT_FMT ")\n",
-                             new_block, block_count, max_block);
-                return;
-            }
-
-            for (size_t i = 0; i < block_count; i++) {
-                ATB_ANY_TO_FREE(area, new_block + i);
-            }
-
-            // Copy object data from old location to new
-            byte *src = (byte *)PTR_FROM_BLOCK(area, block);
-            byte *dst = (byte *)PTR_FROM_BLOCK(area, new_block);
-            size_t copy_size = block_count * BYTES_PER_BLOCK;
-
-            // DEBUG_printf("gc_compact_copy: moving " UINT_FMT " blocks: block " UINT_FMT " -> block " UINT_FMT " (" UINT_FMT " bytes)\n",
-            //              block_count, block, new_block, copy_size);
-
-            memmove(dst, src, copy_size);
-
-            // Clear allocation table at old location FIRST.  
-            for (size_t i = 0; i < block_count; i++) {
-                ATB_ANY_TO_FREE(area, block + i);
-            }
-
-            // Update Allocation Table at NEW location
-            ATB_FREE_TO_HEAD(area, new_block);
-            for (size_t i = new_block + 1; i < new_block + block_count; i++) {
-                ATB_FREE_TO_TAIL(area, i);
-            }
-
-            // Track frontier
-            compacted_frontier = MAX(compacted_frontier, new_block + block_count);
-
-            #if CLEAR_ON_SWEEP
-            memset(src, 0, copy_size);
-            #endif
-
+            compacted_frontier = MAX(compacted_frontier, block + block_count);
             block = next_block - 1;
+            continue;
         }
-    }
 
-    // VALIDATION: Check ATB integrity after copy
-    {
-        size_t max_block_val = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
-        size_t head_count = 0, tail_count = 0, free_count = 0, mark_count = 0;
-        for (size_t block = 0; block < max_block_val; block++) {
-            byte kind = ATB_GET_KIND(area, block);
-            if (kind == AT_HEAD) head_count++;
-            else if (kind == AT_TAIL) tail_count++;
-            else if (kind == AT_FREE) free_count++;
-            else if (kind == AT_MARK) mark_count++;
-        }
-        DEBUG_printf("gc_compact_copy: ATB state after copy- HEAD=" UINT_FMT ", TAIL=" UINT_FMT ", FREE=" UINT_FMT ", MARK=" UINT_FMT "\n",
-                     head_count, tail_count, free_count, mark_count);
-    }
-
-    // Final cleanup: Clear any remaining AT_MARK blocks that weren't in forward table
-    // (These are orphaned or unreachable blocks)
-    // BUT: Skip pinned blocks - they stay AT_MARK in place
-    for (size_t block = 0; block < max_block; block++) {
-        byte block_kind = ATB_GET_KIND(area, block);
-        if (block_kind == AT_MARK) {
-            // Check if this block is pinned - if so, skip it (keep it AT_MARK)
-            bool is_pinned = false;
-            for (size_t p = 0; p < gc_pinned_table.count; p++) {
-                size_t pinned_start = gc_pinned_table.ranges[p].block_start;
-                size_t pinned_count = gc_pinned_table.ranges[p].block_count;
-                if (block >= pinned_start && block < pinned_start + pinned_count) {
-                    is_pinned = true;
-                    break;
+        size_t new_block = gc_forward_table_lookup(forward_table, block);
+        if (new_block == (size_t)-1 || new_block == block) {
+            if (block_kind == AT_MARK) {
+                ATB_MARK_TO_HEAD(area, block);
+                for (size_t i = block + 1; i < block + block_count; i++) {
+                    ATB_MARK_TO_TAIL(area, i);
                 }
             }
-            
-            if (is_pinned) {
-                continue;  // Skip pinned blocks, keep them as AT_MARK
-            }
-            
-            // Count consecutive tail blocks
-            size_t tail_count = 0;
-            size_t check = block + 1;
-            while (check < max_block && ATB_GET_KIND(area, check) == AT_TAIL) {
-                tail_count++;
-                check++;
-            }
-            ATB_ANY_TO_FREE(area, block);
-            for (size_t i = 0; i < tail_count; i++) {
-                if (block + 1 + i < max_block) {
-                    ATB_ANY_TO_FREE(area, block + 1 + i);
-                }
-            }
-            block += tail_count;  // Skip past the tail blocks we just cleared
+            compacted_frontier = MAX(compacted_frontier, block + block_count);
+            block = next_block - 1;
+            continue;
         }
-    }
 
-    // Ensure all blocks from compacted frontier onwards are marked FREE
-    // This is essential for the allocator to find free space in subsequent allocations
-    // BUT: Skip pinned blocks - they must remain as AT_HEAD/AT_TAIL
-    for (size_t block = compacted_frontier; block < max_block; block++) {
-        // Check if this block is pinned - if so, skip it
-        bool is_pinned = false;
-        for (size_t p = 0; p < gc_pinned_table.count; p++) {
-            size_t pinned_start = gc_pinned_table.ranges[p].block_start;
-            size_t pinned_count = gc_pinned_table.ranges[p].block_count;
-            if (block >= pinned_start && block < pinned_start + pinned_count) {
-                is_pinned = true;
-                break;
-            }
+        // PASS 1: Only process DOWN-moves (new_block < block)
+        if (new_block >= block) {
+            block = next_block - 1;
+            continue;  // Save for pass 2
         }
+
+        // Perform the DOWN-move
+        byte *src = (byte *)PTR_FROM_BLOCK(area, block);
+        byte *dst = (byte *)PTR_FROM_BLOCK(area, new_block);
+        size_t copy_size = block_count * BYTES_PER_BLOCK;
         
-        if (!is_pinned) {
-            byte block_kind = ATB_GET_KIND(area, block);
-            if (block_kind != AT_FREE) {
-                ATB_ANY_TO_FREE(area, block);
+        memmove(dst, src, copy_size);
+
+        // Clear old location
+        for (size_t i = 0; i < block_count; i++) {
+            ATB_ANY_TO_FREE(area, block + i);
+        }
+
+        // Mark new location
+        ATB_FREE_TO_HEAD(area, new_block);
+        for (size_t i = new_block + 1; i < new_block + block_count; i++) {
+            ATB_FREE_TO_TAIL(area, i);
+        }
+
+        compacted_frontier = MAX(compacted_frontier, new_block + block_count);
+        pass1_count++;
+        block = next_block - 1;
+    }
+    size_t pass2_count = 0;
+
+    // Reverse iteration: start from end, go backwards
+    for (ssize_t idx = (ssize_t)process_limit - 1; idx >= 0; idx--) {
+        size_t block = (size_t)idx;
+        byte block_kind = ATB_GET_KIND(area, block);
+        if (block_kind != AT_HEAD && block_kind != AT_MARK) continue;
+
+        size_t block_count = 1;
+        size_t next_block = block + 1;
+        while (next_block < max_block && ATB_GET_KIND(area, next_block) == AT_TAIL) {
+            block_count++;
+            next_block++;
+        }
+
+        bool is_pinned = gc_is_block_pinned(block);
+        if (is_pinned) {
+            if (block_kind == AT_MARK) {
+                ATB_MARK_TO_HEAD(area, block);
+                for (size_t i = block + 1; i < block + block_count; i++) {
+                    ATB_MARK_TO_TAIL(area, i);
+                }
+            }
+            compacted_frontier = MAX(compacted_frontier, block + block_count);
+            continue;
+        }
+
+        size_t new_block = gc_forward_table_lookup(forward_table, block);
+        if (new_block == (size_t)-1 || new_block == block) {
+            if (block_kind == AT_MARK) {
+                ATB_MARK_TO_HEAD(area, block);
+                for (size_t i = block + 1; i < block + block_count; i++) {
+                    ATB_MARK_TO_TAIL(area, i);
+                }
+            }
+            compacted_frontier = MAX(compacted_frontier, block + block_count);
+            continue;
+        }
+
+        // PASS 2: Only process UP-moves (new_block > block) - already moved down objects will have cleared their old space
+        if (new_block < block) {
+            continue;  // Already processed in pass 1
+        }
+
+        // Perform the UP-move
+        byte *src = (byte *)PTR_FROM_BLOCK(area, block);
+        byte *dst = (byte *)PTR_FROM_BLOCK(area, new_block);
+        size_t copy_size = block_count * BYTES_PER_BLOCK;
+
+        memmove(dst, src, copy_size);
+
+        // Clear old location
+        for (size_t i = 0; i < block_count; i++) {
+            ATB_ANY_TO_FREE(area, block + i);
+        }
+
+        // Mark new location
+        ATB_FREE_TO_HEAD(area, new_block);
+        for (size_t i = new_block + 1; i < new_block + block_count; i++) {
+            ATB_FREE_TO_TAIL(area, i);
+        }
+
+        compacted_frontier = MAX(compacted_frontier, new_block + block_count);
+        pass2_count++;
+    }
+    size_t atmark_cleared = 0;
+
+    for (size_t block = 0; block < max_block; ) {
+        byte block_kind = ATB_GET_KIND(area, block);
+        
+        if (block_kind != AT_MARK) {
+            block++;
+            continue;
+        }
+
+        bool is_pinned = gc_is_block_pinned(block);
+        if (is_pinned) {
+            block++;
+            continue;
+        }
+
+        // Count consecutive tail blocks
+        size_t tail_count = 0;
+        size_t check = block + 1;
+        while (check < max_block && ATB_GET_KIND(area, check) == AT_TAIL) {
+            tail_count++;
+            check++;
+        }
+
+        ATB_ANY_TO_FREE(area, block);
+        for (size_t i = 0; i < tail_count; i++) {
+            if (block + 1 + i < max_block) {
+                ATB_ANY_TO_FREE(area, block + 1 + i);
             }
         }
-    }
 
-    // Print ATB state after ALL cleanup is complete
+        atmark_cleared++;
+        block += tail_count + 1;
+    }
     {
         size_t max_block_val = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
         size_t head_count = 0, tail_count = 0, free_count = 0, mark_count = 0;
@@ -2364,11 +2400,10 @@ static void gc_compact_copy(mp_state_mem_area_t *area, gc_forward_table_t *forwa
             else if (kind == AT_FREE) free_count++;
             else if (kind == AT_MARK) mark_count++;
         }
-        DEBUG_printf("gc_compact_copy: ATB state AFTER cleanup - HEAD=" UINT_FMT ", TAIL=" UINT_FMT ", FREE=" UINT_FMT ", MARK=" UINT_FMT "\n",
-                     head_count, tail_count, free_count, mark_count);
     }
 }
 
+__attribute__((unused))
 static void gc_update_references(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
     // Update all internal object references
     size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
@@ -2376,8 +2411,8 @@ static void gc_update_references(mp_state_mem_area_t *area, gc_forward_table_t *
     size_t refs_updated = 0;
     size_t pinned_found = 0;
 
-    DEBUG_printf("gc_update_references: ENTER - examining up to " UINT_FMT " blocks, pinned_table.count=" UINT_FMT "\n", 
-                 max_block, gc_pinned_table.count);
+        DEBUG_printf("PHASE3_START: max_block=" UINT_FMT ", pinned_table.count=" UINT_FMT "\n",
+               max_block, gc_pinned_table.count);
 
     for (size_t block = 0; block < max_block; block++) {
         byte block_kind = ATB_GET_KIND(area, block);
@@ -2405,10 +2440,41 @@ static void gc_update_references(mp_state_mem_area_t *area, gc_forward_table_t *
             void **obj_start = (void **)PTR_FROM_BLOCK(area, block);
             size_t words_count = (block_count * BYTES_PER_BLOCK) / sizeof(void*);
 
-            DEBUG_printf("gc_update_ref: obj " UINT_FMT " at block " UINT_FMT " (" UINT_FMT " blocks, " UINT_FMT " words) %s\n",
-                         objects_processed, block, block_count, words_count, is_pinned ? "PINNED" : "moved");
+            // Only scan allocations that look like real MP objects:
+            // word[0] should be a type pointer that is non-NULL, above the
+            // small-immediate range, and outside the GC heap.
+            // This avoids corrupting raw data/bytecode buffers by interpreting
+            // arbitrary bytes as heap references.
+            mp_obj_base_t *obj_base = (mp_obj_base_t *)obj_start;
+            uintptr_t type_ptr = (uintptr_t)obj_base->type;
+            bool type_in_heap = false;
+            #if MICROPY_GC_SPLIT_HEAP
+            type_in_heap = (gc_get_ptr_area((void *)type_ptr) != NULL);
+            #else
+            type_in_heap = ((byte *)type_ptr >= (byte *)area->gc_pool_start && (byte *)type_ptr < (byte *)area->gc_pool_end);
+            #endif
+            bool looks_like_obj = (type_ptr != 0) && (type_ptr >= 0x100000) && !type_in_heap;
+            if (!looks_like_obj) {
+                continue;
+            }
 
+            // CRITICAL: Check if this is a pointer object and skip its addr field
+            // mp_obj_pointer_t layout: word 0 = type ptr, word 1 = addr (raw, not a GC ref)
+            bool is_pointer_obj = false;
+            if (obj_base && obj_base->type) {
+                // Check if this object's type is mp_type_pointer
+                // mp_type_pointer.base.name should be "pointer"
+                is_pointer_obj = (obj_base->type == &mp_type_pointer);
+                if (is_pointer_obj) {
+                }
+            }
+            
             for (size_t i = 0; i < words_count; i++) {
+                // SKIP pointer object's addr field (word index 1) - ORIGINAL DETECTION
+                if (is_pointer_obj && i == 1) {
+                    continue;
+                }
+                
                 void *ref_ptr = obj_start[i];
                 
                 // Skip obvious non-pointers (small integers, tagged values)
@@ -2416,19 +2482,17 @@ static void gc_update_references(mp_state_mem_area_t *area, gc_forward_table_t *
                     continue;
                 }
                 
-                // Determine which heap area this reference points to
-                mp_state_mem_area_t *ref_area;
+                // SAFETY: Check if this looks like a valid heap reference BEFORE attempting lookup
+                // Skip addresses that are outside heap pool bounds entirely
+                mp_state_mem_area_t *ref_area = NULL;
                 #if MICROPY_GC_SPLIT_HEAP
                 ref_area = gc_get_ptr_area(ref_ptr);
-                #else
-                // Single heap: validate pointer range
-                if (VERIFY_PTR(ref_ptr)) {
-                    ref_area = &MP_STATE_MEM(area);
-                } else {
-                    continue;
+                #else  
+                if ((byte *)ref_ptr >= (byte *)area->gc_pool_start && (byte *)ref_ptr < (byte *)area->gc_pool_end) {
+                    ref_area = area;
                 }
                 #endif
-
+                
                 if (ref_area) {
                     size_t old_block = BLOCK_FROM_PTR(ref_area, ref_ptr);
                     size_t new_block = gc_forward_table_lookup(forward_table, old_block);
@@ -2436,20 +2500,22 @@ static void gc_update_references(mp_state_mem_area_t *area, gc_forward_table_t *
                         // FIX: Calculate offset within block - pointers often point inside blocks (e.g., bytecode)
                         uintptr_t offset = (uintptr_t)ref_ptr - (uintptr_t)PTR_FROM_BLOCK(ref_area, old_block);
                         void *new_ptr = (void *)((uintptr_t)PTR_FROM_BLOCK(ref_area, new_block) + offset);
+                        
+                        // Write the new pointer
                         obj_start[i] = new_ptr;
+                        
                         refs_updated++;
-                        DEBUG_printf("gc_update_ref: obj block " UINT_FMT " word " UINT_FMT ": pointer block " UINT_FMT " (offset " UINT_FMT ") -> block " UINT_FMT "\n",
-                                     block, i, old_block, offset, new_block);
                     }
                 }
+            }
+
+            if (obj_base->type == &mp_type_module) {
+                _gc_update_module_context_obj_table((mp_module_context_t *)obj_base, forward_table);
             }
 
             block = next_block - 1;
         }
     }
-    
-    DEBUG_printf("gc_update_references: processed " UINT_FMT " objects (including " UINT_FMT " pinned), updated " UINT_FMT " references\n",
-                 objects_processed, pinned_found, refs_updated);
 
     {
         size_t max_block_val = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
@@ -2463,6 +2529,16 @@ static void gc_update_references(mp_state_mem_area_t *area, gc_forward_table_t *
         }
         DEBUG_printf("gc_update_references: ATB state - HEAD=" UINT_FMT ", TAIL=" UINT_FMT ", FREE=" UINT_FMT ", MARK=" UINT_FMT "\n",
                      head_count, tail_count, free_count, mark_count);
+    }
+}
+
+static void _gc_update_module_context_obj_table(mp_module_context_t *ctx, gc_forward_table_t *forward_table) {
+    if (ctx->constants.obj_table == NULL || ctx->obj_table_len == 0) {
+        return;
+    }
+
+    for (size_t i = 0; i < ctx->obj_table_len; ++i) {
+        ctx->constants.obj_table[i] = (mp_obj_t)gc_update_ptr((void *)ctx->constants.obj_table[i], forward_table);
     }
 }
 

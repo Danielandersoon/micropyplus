@@ -5,11 +5,21 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+// Helper function to get address from pointer object
+static inline intptr_t pointer_get_addr(mp_obj_pointer_t *p) {
+    return p->addr;
+}
+
+// Helper function to set address on pointer object
+static inline void pointer_set_addr(mp_obj_pointer_t *p, intptr_t addr) {
+    p->addr = addr;
+}
+
 // Print function for pointer objects
 static void pointer_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
     (void)kind;
     mp_obj_pointer_t *o = MP_OBJ_TO_PTR(self_in);
-    mp_printf(print, "0x%lx", (unsigned long)o->addr);
+    mp_printf(print, "0x%lx", (unsigned long)pointer_get_addr(o));
 }
 
 // Binary operations on pointers (addition, subtraction, comparison)
@@ -19,7 +29,7 @@ static mp_obj_t pointer_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t r
         return MP_OBJ_NULL; // Not a pointer on LHS
     }
     mp_obj_pointer_t *lhs = MP_OBJ_TO_PTR(lhs_in);
-    intptr_t lhs_addr = lhs->addr;
+    intptr_t lhs_addr = pointer_get_addr(lhs);
 
     switch (op) {
         case MP_BINARY_OP_ADD:
@@ -33,7 +43,7 @@ static mp_obj_t pointer_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t r
             if (mp_obj_is_type(rhs_in, &mp_type_pointer)) {
                 // ptr - ptr → int (difference in bytes)
                 mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
-                return mp_obj_new_int(lhs_addr - rhs->addr);
+                return mp_obj_new_int(lhs_addr - pointer_get_addr(rhs));
             } else {
                 // ptr - int → new pointer
                 return mp_obj_new_pointer((mp_obj_t *)(lhs_addr - mp_obj_get_int(rhs_in)));
@@ -43,7 +53,7 @@ static mp_obj_t pointer_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t r
         case MP_BINARY_OP_EQUAL: {
             if (mp_obj_is_type(rhs_in, &mp_type_pointer)) {
                 mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
-                return mp_obj_new_bool(lhs_addr == rhs->addr);
+                return mp_obj_new_bool(lhs_addr == pointer_get_addr(rhs));
             }
             return mp_obj_new_bool(false);
         }
@@ -51,7 +61,7 @@ static mp_obj_t pointer_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t r
         case MP_BINARY_OP_NOT_EQUAL: {
             if (mp_obj_is_type(rhs_in, &mp_type_pointer)) {
                 mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
-                return mp_obj_new_bool(lhs_addr != rhs->addr);
+                return mp_obj_new_bool(lhs_addr != pointer_get_addr(rhs));
             }
             return mp_obj_new_bool(true);
         }
@@ -59,7 +69,7 @@ static mp_obj_t pointer_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t r
         case MP_BINARY_OP_LESS: {
             if (mp_obj_is_type(rhs_in, &mp_type_pointer)) {
                 mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
-                return mp_obj_new_bool(lhs_addr < rhs->addr);
+                return mp_obj_new_bool(lhs_addr < pointer_get_addr(rhs));
             }
             return MP_OBJ_NULL; // Can't compare pointer to non-pointer
         }
@@ -67,7 +77,7 @@ static mp_obj_t pointer_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t r
         case MP_BINARY_OP_LESS_EQUAL: {
             if (mp_obj_is_type(rhs_in, &mp_type_pointer)) {
                 mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
-                return mp_obj_new_bool(lhs_addr <= rhs->addr);
+                return mp_obj_new_bool(lhs_addr <= pointer_get_addr(rhs));
             }
             return MP_OBJ_NULL;
         }
@@ -75,7 +85,7 @@ static mp_obj_t pointer_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t r
         case MP_BINARY_OP_MORE: {
             if (mp_obj_is_type(rhs_in, &mp_type_pointer)) {
                 mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
-                return mp_obj_new_bool(lhs_addr > rhs->addr);
+                return mp_obj_new_bool(lhs_addr > pointer_get_addr(rhs));
             }
             return MP_OBJ_NULL;
         }
@@ -83,7 +93,7 @@ static mp_obj_t pointer_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t r
         case MP_BINARY_OP_MORE_EQUAL: {
             if (mp_obj_is_type(rhs_in, &mp_type_pointer)) {
                 mp_obj_pointer_t *rhs = MP_OBJ_TO_PTR(rhs_in);
-                return mp_obj_new_bool(lhs_addr >= rhs->addr);
+                return mp_obj_new_bool(lhs_addr >= pointer_get_addr(rhs));
             }
             return MP_OBJ_NULL;
         }
@@ -104,24 +114,10 @@ MP_DEFINE_CONST_OBJ_TYPE(
 
 // Create a new pointer object wrapping the given address
 mp_obj_t mp_obj_new_pointer(mp_obj_t *addr) {
-    // CRITICAL: Pin the TARGET object that this pointer points to
-    // When Python code holds a pointer to an object, that object cannot move
-    // during GC or the pointer becomes invalid.
-    // NOTE: We pin only the target, not the pointer object itself.
-    // The pointer object is just a wrapper - as long as the target stays put,
-    // the pointer remains valid (pointers are relative to their target, not stored location)
-    if (addr != NULL && mp_obj_is_obj(*addr)) {
-        gc_pin(*addr);
-    }
-    
     // Allocate the pointer object itself with normal GC allocation
     mp_obj_pointer_t *o = m_new_obj(mp_obj_pointer_t);
-    if (o == NULL) {
-        return mp_const_none;  // Return None on failure
-    }
     o->base.type = &mp_type_pointer;
-    o->addr = (intptr_t)addr;  // Store the address using intptr_t
-    
+    pointer_set_addr(o, (intptr_t)addr);
     return MP_OBJ_FROM_PTR(o);
 }
 
@@ -132,7 +128,7 @@ mp_obj_t mp_obj_new_pointer(mp_obj_t *addr) {
 mp_obj_t mp_obj_new_pointer_fast(mp_obj_t *addr) {
     mp_obj_pointer_t *o = m_new_obj(mp_obj_pointer_t);
     o->base.type = &mp_type_pointer;
-    o->addr = (intptr_t)addr;
+    pointer_set_addr(o, (intptr_t)addr);
     // NOTE: Intentionally skipping gc_pin() for speed - safe only for ephemeral arithm
     return MP_OBJ_FROM_PTR(o);
 }
@@ -147,7 +143,7 @@ mp_obj_t *mp_obj_pointer_get_addr(mp_obj_t ptr) {
         mp_raise_TypeError(MP_ERROR_TEXT("expected pointer object"));
     }
     mp_obj_pointer_t *p = MP_OBJ_TO_PTR(ptr);
-    return (mp_obj_t *)p->addr;  // Cast back from intptr_t to pointer
+    return (mp_obj_t *)pointer_get_addr(p);
 }
 
 // Extract the pointer from a pointer object  
@@ -160,5 +156,5 @@ mp_obj_t *mp_obj_pointer_get(mp_obj_t ptr) {
         mp_raise_TypeError(MP_ERROR_TEXT("expected pointer object"));
     }
     mp_obj_pointer_t *p = MP_OBJ_TO_PTR(ptr);
-    return (mp_obj_t *)p->addr;  // Cast back from intptr_t to pointer
+    return (mp_obj_t *)pointer_get_addr(p);
 }

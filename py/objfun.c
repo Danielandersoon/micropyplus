@@ -173,6 +173,7 @@ static mp_obj_t fun_bc_make_new(const mp_obj_type_t *type, size_t n_args, size_t
     module_context->module.base.type = &mp_type_module;
     module_context->module.globals = MP_OBJ_TO_PTR(globals);
     module_context->constants = *mp_code_get_constants(code);
+    module_context->obj_table_len = mp_code_get_obj_table_len(code);
 
     return mp_make_function_from_proto_fun(mp_code_get_proto_fun(code), module_context, NULL);
 }
@@ -245,6 +246,15 @@ mp_code_state_t *mp_obj_fun_bc_prepare_codestate(mp_obj_t self_in, size_t n_args
     #endif
 
     INIT_CODESTATE(code_state, self, n_state, n_args, n_kw, args);
+
+    #if !MICROPY_ENABLE_PYSTACK
+    // If code_state is heap-allocated, pin it while executing bytecode.
+    // GC compaction must not move the active frame because vm.c keeps C locals
+    // that point into this frame.
+    if (state_size != 0) {
+        gc_pin(code_state);
+    }
+    #endif
 
     // execute the byte code with the correct globals context
     mp_globals_set(self->context->module.globals);
@@ -343,6 +353,7 @@ static mp_obj_t fun_bc_call(mp_obj_t self_in, size_t n_args, size_t n_kw, const 
     #else
     // free the state if it was allocated on the heap
     if (state_size != 0) {
+        gc_unpin(code_state);
         m_del_var(mp_code_state_t, state, byte, state_size, code_state);
     }
     #endif

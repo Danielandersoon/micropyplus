@@ -1046,6 +1046,9 @@ typedef struct _mp_obj_pointer_t {
     intptr_t addr;  // Store the address using intptr_t to preserve full pointer value
 } mp_obj_pointer_t;
 
+// Helper macro to safely access pointer address
+#define MP_POINTER_GET_ADDR(p) ((p)->addr)
+
 mp_obj_t mp_obj_new_pointer(mp_obj_t *addr);
 mp_obj_t mp_obj_new_pointer_fast(mp_obj_t *addr);  // Fast path for temporary arithmetic (no GC pinning)
 mp_obj_t *mp_obj_pointer_get_addr(mp_obj_t ptr);

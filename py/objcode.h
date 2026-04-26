@@ -64,6 +64,11 @@ static inline const mp_module_constants_t *mp_code_get_constants(mp_obj_code_t *
     return &self->constants;
 }
 
+static inline size_t mp_code_get_obj_table_len(mp_obj_code_t *self) {
+    (void)self;
+    return 0;
+}
+
 static inline const void *mp_code_get_proto_fun(mp_obj_code_t *self) {
     return self->proto_fun;
 }
@@ -88,6 +93,10 @@ mp_obj_t mp_obj_new_code(const mp_module_context_t *context, const mp_raw_code_t
 
 static inline const mp_module_constants_t *mp_code_get_constants(mp_obj_code_t *self) {
     return &self->context->constants;
+}
+
+static inline size_t mp_code_get_obj_table_len(mp_obj_code_t *self) {
+    return self->context->obj_table_len;
 }
 
 static inline const void *mp_code_get_proto_fun(mp_obj_code_t *self) {

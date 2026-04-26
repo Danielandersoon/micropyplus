@@ -52,6 +52,7 @@ static mp_obj_t code_execute(mp_obj_code_t *self, mp_obj_dict_t *globals, mp_obj
     module_context->module.base.type = &mp_type_module;
     module_context->module.globals = globals;
     module_context->constants = *mp_code_get_constants(self);
+    module_context->obj_table_len = mp_code_get_obj_table_len(self);
     mp_obj_t module_fun = mp_make_function_from_proto_fun(mp_code_get_proto_fun(self), module_context, NULL);
     #else
     // The call to mp_parse_compile_execute() in mp_builtin_compile() below passes
