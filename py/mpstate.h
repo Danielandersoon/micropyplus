@@ -319,8 +319,11 @@ typedef struct _mp_state_thread_t {
     #if MICROPY_PY_SYS_SETTRACE
     mp_obj_t prof_trace_callback;
     bool prof_callback_is_executing;
-    struct _mp_code_state_t *current_code_state;
     #endif
+
+    // Track currently executing bytecode frame chain so GC can preserve and
+    // rewrite active VM stack roots during compaction, even when settrace is off.
+    struct _mp_code_state_t *current_code_state;
 
     #if MICROPY_PY_SSL_MBEDTLS_NEED_ACTIVE_CONTEXT
     struct _mp_obj_ssl_context_t *tls_ssl_context;

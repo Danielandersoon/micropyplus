@@ -89,6 +89,39 @@ const byte *mp_decode_uint_skip(const byte *ptr) {
 }
 
 static MP_NORETURN void fun_pos_args_mismatch(mp_obj_fun_bc_t *f, size_t expected, size_t given) {
+    #if MICROPY_DEBUG_VERBOSE
+    if (f != NULL) {
+        qstr fn_name = mp_obj_fun_get_name(MP_OBJ_FROM_PTR(f));
+        mp_code_state_t *caller_cs = MP_STATE_THREAD(current_code_state);
+        mp_obj_fun_bc_t *caller_fun = caller_cs != NULL ? caller_cs->fun_bc : NULL;
+        qstr caller_name = MP_QSTRnull;
+        if (caller_fun != NULL) {
+            caller_name = mp_obj_fun_get_name(MP_OBJ_FROM_PTR(caller_fun));
+        }
+        DEBUG_printf("[arg-mismatch] fun=%p type=%p ctx=%p bytecode=%p child=%p expected=%u given=%u\n",
+            f,
+            f->base.type,
+            f->context,
+            f->bytecode,
+            f->child_table,
+            (unsigned)expected,
+            (unsigned)given);
+        DEBUG_printf("[arg-mismatch] callee_name=%s caller_fun=%p caller_name=%s caller_ip=%p\n",
+            qstr_str(fn_name),
+            caller_fun,
+            caller_name == MP_QSTRnull ? "<null>" : qstr_str(caller_name),
+            caller_cs != NULL ? caller_cs->ip : NULL);
+        if (f->bytecode != NULL) {
+            const byte *bc = f->bytecode;
+            DEBUG_printf("[arg-mismatch] bc-bytes:");
+            for (size_t i = 0; i < 16; ++i) {
+                DEBUG_printf(" %02x", (unsigned)bc[i]);
+            }
+            DEBUG_printf("\n");
+        }
+    }
+    #endif
+
     #if MICROPY_ERROR_REPORTING <= MICROPY_ERROR_REPORTING_TERSE
     // generic message, used also for other argument issues
     (void)f;
@@ -325,8 +358,8 @@ void mp_setup_code_state(mp_code_state_t *code_state, size_t n_args, size_t n_kw
     #if MICROPY_STACKLESS
     code_state->prev = NULL;
     #endif
-    #if MICROPY_PY_SYS_SETTRACE
     code_state->prev_state = NULL;
+    #if MICROPY_PY_SYS_SETTRACE
     code_state->frame = NULL;
     #endif
     mp_setup_code_state_helper(code_state, n_args, n_kw, args);

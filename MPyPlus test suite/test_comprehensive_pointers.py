@@ -6,7 +6,6 @@ pass_count = 0
 fail_count = 0
 arr = [100, 200, 300, 400, 500]
 
-
 def test(desc):
     def decorator(func):
         global pass_count, fail_count
@@ -132,6 +131,13 @@ def test_global_update():
     g_val = 666
     return *pgv == 666
 
+
+@test("Global pointer defined out of function")
+def test_global_ptr_out_func():
+    gPtr = &g_val
+    *gPtr = 9.81
+    return *gPtr == 9.81
+
 @test("Multiple pointers same var")
 def test_multi_ptr():
     val = 123
@@ -185,17 +191,18 @@ def test_pointer_subscript():
 
 @test("Pointer subscript with positive offset")
 def test_ptr_subscript_offset():
-    arr = [100, 200, 300, 400, 500]
-    ptr = &arr[0]
+    arr_local = [100, 200, 300, 400, 500]
+    ptr = &arr_local[0]
     ptr2 = ptr + 24  # 3 elements * 8 bytes each
     return *ptr2 == 400
 
 @test("Pointer subscript with negative offset")
 def test_ptr_subscript_negative():
-    arr = [100, 200, 300, 400, 500]
-    ptr = &arr[2]
-    return *(ptr - 16) == 100
-    
+    arr_local = [100, 200, 300, 400, 500]
+    ptr = &arr_local[2]
+    ptr2 = ptr -16  # Debug print to check value at ptr2
+    return *ptr2 == 100
+
 # Print summary
 print("\n" + "-"*50)
 print("TOTAL TESTS: " + str(pass_count + fail_count))

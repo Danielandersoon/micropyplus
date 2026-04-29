@@ -35,6 +35,7 @@
 #include "py/mphal.h"
 #include "py/runtime0.h"
 #include "py/bc.h"
+#include "py/gc.h"
 #include "py/objfun.h"
 #include "py/profile.h"
 
@@ -54,6 +55,9 @@ mp_uint_t mp_verbose_flag = 0;
 
 mp_raw_code_t *mp_emit_glue_new_raw_code(void) {
     mp_raw_code_t *rc = m_new0(mp_raw_code_t, 1);
+    if (rc != NULL) {
+        gc_pin(rc);
+    }
     rc->kind = MP_CODE_RESERVED;
     #if MICROPY_PY_SYS_SETTRACE
     rc->line_of_definition = 0;
@@ -177,6 +181,10 @@ mp_obj_t mp_make_function_from_proto_fun(mp_proto_fun_t proto_fun, const mp_modu
     DEBUG_OP_printf("make_function_from_proto_fun %p\n", proto_fun);
     assert(proto_fun != NULL);
 
+    #if MICROPY_DEBUG_FUN_GC_TRACE
+    printf("[fun-trace] make_function proto=%p context=%p def_args=%p\n", proto_fun, context, def_args);
+    #endif
+
     // def_args must be MP_OBJ_NULL or a tuple
     assert(def_args == NULL || def_args[0] == MP_OBJ_NULL || mp_obj_is_type(def_args[0], &mp_type_tuple));
 
@@ -197,6 +205,32 @@ mp_obj_t mp_make_function_from_proto_fun(mp_proto_fun_t proto_fun, const mp_modu
 
     // the proto-function is a mp_raw_code_t
     const mp_raw_code_t *rc = proto_fun;
+
+    #if MICROPY_DEBUG_FUN_GC_TRACE
+    printf("[fun-trace] make_function rc=%p kind=%u gen=%u fun_data=%p children=%p\n",
+        rc, (unsigned)rc->kind, (unsigned)rc->is_generator, rc->fun_data, rc->children);
+    if (rc->kind == MP_CODE_BYTECODE && rc->fun_data != NULL) {
+        const byte *bc = rc->fun_data;
+        size_t n_state, n_exc_stack, scope_flags, n_pos_args, n_kwonly_args, n_def_pos_args;
+        MP_BC_PRELUDE_SIG_DECODE_INTO(bc, n_state, n_exc_stack, scope_flags, n_pos_args, n_kwonly_args, n_def_pos_args);
+        size_t n_info, n_cell;
+        MP_BC_PRELUDE_SIZE_DECODE_INTO(bc, n_info, n_cell);
+        mp_uint_t name = mp_decode_uint_value(bc);
+        printf("[fun-trace] make_function rc-sig pos=%u kwonly=%u def=%u scope=0x%x raw-name=%u\n",
+            (unsigned)n_pos_args, (unsigned)n_kwonly_args, (unsigned)n_def_pos_args,
+            (unsigned)scope_flags, (unsigned)name);
+    }
+    if (rc->children != NULL) {
+        size_t bytes = gc_nbytes((void *)rc->children);
+        size_t entries = bytes == 0 ? 0 : bytes / sizeof(rc->children[0]);
+        size_t limit = entries < 4 ? entries : 4;
+        printf("[fun-trace] make_function rc-children=%p bytes=%u entries~=%u\n",
+            rc->children, (unsigned)bytes, (unsigned)entries);
+        for (size_t i = 0; i < limit; ++i) {
+            printf("[fun-trace] make_function rc-child[%u]=%p\n", (unsigned)i, rc->children[i]);
+        }
+    }
+    #endif
 
     // make the function, depending on the raw code kind
     mp_obj_t fun;
@@ -236,11 +270,19 @@ mp_obj_t mp_make_function_from_proto_fun(mp_proto_fun_t proto_fun, const mp_modu
             break;
     }
 
+    #if MICROPY_DEBUG_FUN_GC_TRACE
+    printf("[fun-trace] make_function result=%p type=%p\n", MP_OBJ_TO_PTR(fun), ((mp_obj_base_t *)MP_OBJ_TO_PTR(fun))->type);
+    #endif
+
     return fun;
 }
 
 mp_obj_t mp_make_closure_from_proto_fun(mp_proto_fun_t proto_fun, const mp_module_context_t *context, mp_uint_t n_closed_over, const mp_obj_t *args) {
     DEBUG_OP_printf("make_closure_from_proto_fun %p " UINT_FMT " %p\n", proto_fun, n_closed_over, args);
+    #if MICROPY_DEBUG_FUN_GC_TRACE
+    printf("[fun-trace] make_closure proto=%p context=%p n_closed_over=0x%x args=%p\n",
+        proto_fun, context, (unsigned)n_closed_over, args);
+    #endif
     // make function object
     mp_obj_t ffun;
     if (n_closed_over & 0x100) {
@@ -251,5 +293,10 @@ mp_obj_t mp_make_closure_from_proto_fun(mp_proto_fun_t proto_fun, const mp_modul
         ffun = mp_make_function_from_proto_fun(proto_fun, context, NULL);
     }
     // wrap function in closure object
-    return mp_obj_new_closure(ffun, n_closed_over & 0xff, args + ((n_closed_over >> 7) & 2));
+    mp_obj_t closure = mp_obj_new_closure(ffun, n_closed_over & 0xff, args + ((n_closed_over >> 7) & 2));
+    #if MICROPY_DEBUG_FUN_GC_TRACE
+    printf("[fun-trace] make_closure result=%p fun=%p n_closed=%u\n",
+        MP_OBJ_TO_PTR(closure), MP_OBJ_TO_PTR(ffun), (unsigned)(n_closed_over & 0xff));
+    #endif
+    return closure;
 }

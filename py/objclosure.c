@@ -29,6 +29,8 @@
 #include "py/obj.h"
 #include "py/runtime.h"
 
+#define MICROPY_DEBUG_FUN_GC_TRACE (0)
+
 typedef struct _mp_obj_closure_t {
     mp_obj_base_t base;
     mp_obj_t fun;
@@ -38,6 +40,14 @@ typedef struct _mp_obj_closure_t {
 
 static mp_obj_t closure_call(mp_obj_t self_in, size_t n_args, size_t n_kw, const mp_obj_t *args) {
     mp_obj_closure_t *self = MP_OBJ_TO_PTR(self_in);
+
+    #if MICROPY_DEBUG_FUN_GC_TRACE
+    printf("[fun-trace] closure_call self=%p fun=%p n_closed=%u n_args=%u n_kw=%u\n",
+        self, MP_OBJ_TO_PTR(self->fun), (unsigned)self->n_closed, (unsigned)n_args, (unsigned)n_kw);
+    for (size_t i = 0; i < self->n_closed; ++i) {
+        printf("[fun-trace] closure_call closed[%u]=%p\n", (unsigned)i, MP_OBJ_TO_PTR(self->closed[i]));
+    }
+    #endif
 
     // need to concatenate closed-over-vars and args
 
@@ -109,5 +119,8 @@ mp_obj_t mp_obj_new_closure(mp_obj_t fun, size_t n_closed_over, const mp_obj_t *
     o->fun = fun;
     o->n_closed = n_closed_over;
     memcpy(o->closed, closed, n_closed_over * sizeof(mp_obj_t));
+    #if MICROPY_DEBUG_FUN_GC_TRACE
+    printf("[fun-trace] new_closure self=%p fun=%p n_closed=%u\n", o, MP_OBJ_TO_PTR(fun), (unsigned)n_closed_over);
+    #endif
     return MP_OBJ_FROM_PTR(o);
 }

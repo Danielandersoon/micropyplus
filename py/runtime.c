@@ -164,8 +164,8 @@ void mp_init(void) {
     #if MICROPY_PY_SYS_SETTRACE
     MP_STATE_THREAD(prof_trace_callback) = MP_OBJ_NULL;
     MP_STATE_THREAD(prof_callback_is_executing) = false;
-    MP_STATE_THREAD(current_code_state) = NULL;
     #endif
+    MP_STATE_THREAD(current_code_state) = NULL;
 
     #if MICROPY_PY_SYS_TRACEBACKLIMIT
     MP_STATE_VM(sys_mutable[MP_SYS_MUTABLE_TRACEBACKLIMIT]) = MP_OBJ_NEW_SMALL_INT(1000);

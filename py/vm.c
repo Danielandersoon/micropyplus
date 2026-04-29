@@ -189,9 +189,28 @@
 } while(0)
 
 #else // MICROPY_PY_SYS_SETTRACE
-#define FRAME_SETUP()
-#define FRAME_ENTER()
-#define FRAME_LEAVE()
+#define FRAME_SETUP() do { \
+    MP_STATE_THREAD(current_code_state) = code_state; \
+} while (0)
+
+#if MICROPY_STACKLESS
+#define FRAME_ENTER() do { \
+    code_state->prev = MP_STATE_THREAD(current_code_state); \
+} while (0)
+
+#define FRAME_LEAVE() do { \
+    MP_STATE_THREAD(current_code_state) = code_state->prev; \
+} while (0)
+#else
+#define FRAME_ENTER() do { \
+    code_state->prev_state = MP_STATE_THREAD(current_code_state); \
+} while (0)
+
+#define FRAME_LEAVE() do { \
+    MP_STATE_THREAD(current_code_state) = code_state->prev_state; \
+} while (0)
+#endif
+
 #define FRAME_UPDATE()
 #define TRACE_TICK(current_ip, current_sp, is_exception)
 #endif // MICROPY_PY_SYS_SETTRACE
@@ -676,8 +695,9 @@ dispatch_loop:
                     if (mp_obj_is_obj(obj_on_stack) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(obj_on_stack))->type == &mp_type_pointer) {
                         mp_obj_pointer_t *p = MP_OBJ_TO_PTR(obj_on_stack);
                         intptr_t addr = MP_POINTER_GET_ADDR(p);
-                        // Validate that the address is within the GC heap before dereferencing
-                        if (addr != 0 && gc_is_valid_ptr((void *)addr)) {
+                        // Allow dereference of any non-null pointer target. Pointer values can
+                        // reference GC heap, VM stack locals, or globals.
+                        if (addr != 0) {
                             SET_TOP(*(mp_obj_t *)addr);
                         } else {
                             mp_raise_ValueError(MP_ERROR_TEXT("pointer address is invalid or freed"));
@@ -1612,6 +1632,66 @@ yield:
                     } else
                 #endif // MICROPY_OPT_COMPUTED_GOTO
                 {
+                    #if MICROPY_DEBUG_VERBOSE
+                    mp_obj_fun_bc_t *dbg_fun = code_state->fun_bc;
+                    const byte *dbg_bc = dbg_fun != NULL ? dbg_fun->bytecode : NULL;
+                    mp_uint_t dbg_rel = 0;
+                    bool dbg_rel_valid = false;
+                    mp_uint_t dbg_op_start_rel = 0;
+                    bool dbg_op_start_valid = false;
+                    if (dbg_bc != NULL && ip != NULL && ip > dbg_bc) {
+                        dbg_rel = (mp_uint_t)((uintptr_t)(ip - 1) - (uintptr_t)dbg_bc);
+                        dbg_rel_valid = true;
+                    }
+                    if (dbg_bc != NULL) {
+                        const byte *dbg_prelude = dbg_bc;
+                        size_t dbg_n_state, dbg_n_exc, dbg_scope_flags, dbg_n_pos, dbg_n_kwonly, dbg_n_def_pos;
+                        MP_BC_PRELUDE_SIG_DECODE_INTO(dbg_prelude, dbg_n_state, dbg_n_exc, dbg_scope_flags, dbg_n_pos, dbg_n_kwonly, dbg_n_def_pos);
+                        MP_BC_PRELUDE_SIZE_DECODE(dbg_prelude);
+                        (void)dbg_n_state;
+                        (void)dbg_n_exc;
+                        (void)dbg_scope_flags;
+                        (void)dbg_n_pos;
+                        (void)dbg_n_kwonly;
+                        (void)dbg_n_def_pos;
+                        dbg_op_start_rel = (mp_uint_t)((uintptr_t)dbg_prelude - (uintptr_t)dbg_bc);
+                        dbg_op_start_valid = true;
+                    }
+                    DEBUG_printf("[vm-opcode-error] op=%u ip=%p ipm1=%p bc=%p rel=" UINT_FMT " rel_valid=%d fun=%p sp=%p exc_idx=%u\n",
+                        (unsigned)ip[-1],
+                        ip,
+                        ip - 1,
+                        dbg_bc,
+                        dbg_rel,
+                        (int)dbg_rel_valid,
+                        dbg_fun,
+                        sp,
+                        (unsigned)code_state->exc_sp_idx);
+                    if (dbg_bc != NULL) {
+                        DEBUG_printf("[vm-opcode-error] type=%p op_start_rel=" UINT_FMT " op_start_valid=%d\n",
+                            dbg_fun != NULL ? dbg_fun->base.type : NULL,
+                            dbg_op_start_rel,
+                            (int)dbg_op_start_valid);
+
+                        mp_uint_t dump_start = 0;
+                        mp_uint_t dump_end = 0;
+                        if (dbg_rel_valid) {
+                            dump_start = dbg_rel > 12 ? dbg_rel - 12 : 0;
+                            dump_end = dbg_rel + 12;
+                        }
+
+                        for (mp_uint_t off = dump_start; off <= dump_end; ++off) {
+                            if ((off & 0x0f) == 0) {
+                                DEBUG_printf("[vm-opcode-error] bytes@" UINT_FMT ":", off);
+                            }
+                            byte b = dbg_bc[off];
+                            DEBUG_printf(" %02x", (unsigned)b);
+                            if ((off & 0x0f) == 0x0f || off == dump_end) {
+                                DEBUG_printf("\n");
+                            }
+                        }
+                    }
+                    #endif
                     mp_obj_t obj = mp_obj_new_exception_msg(&mp_type_NotImplementedError, MP_ERROR_TEXT("opcode"));
                     nlr_pop();
                     code_state->state[0] = obj;

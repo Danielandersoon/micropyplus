@@ -1,9 +1,6 @@
 /*
  * This file is part of the MicroPython project, http://micropython.org/
  *
- * The MIT License (MIT)
- *
- * Copyright (c) 2013, 2014 Damien P. George
  * Copyright (c) 2014 Paul Sokolovsky
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -33,6 +30,11 @@
 #include "py/gc.h"
 #include "py/runtime.h"
 #include "py/bc.h"
+#include "py/emitglue.h"
+#include "py/objfun.h"
+#include "py/objlist.h"
+#include "py/objstr.h"
+#include "py/qstr.h"
 
 #if MICROPY_DEBUG_VALGRIND
 #include <valgrind/memcheck.h>
@@ -40,9 +42,16 @@
 
 #if MICROPY_ENABLE_GC
 
-// Forward declaration of pointer object type (used during GC compaction)
-// to skip the addr field when scanning object references
 extern const mp_obj_type_t mp_type_pointer;
+extern const mp_obj_type_t mp_type_closure;
+extern const mp_obj_type_t mp_type_cell;
+
+typedef struct _gc_obj_closure_t {
+    mp_obj_base_t base;
+    mp_obj_t fun;
+    size_t n_closed;
+    mp_obj_t closed[];
+} gc_obj_closure_t;
 
 #if MICROPY_DEBUG_VERBOSE // print debugging info
 #define DEBUG_PRINT (1)
@@ -54,6 +63,14 @@ extern const mp_obj_type_t mp_type_pointer;
 
 // make this 1 to dump the heap each time it changes
 #define EXTENSIVE_HEAP_PROFILING (0)
+#define READABLE_HEAP_DUMP (0)
+#define MICROPY_DEBUG_FUN_GC_TRACE (0)
+
+// Opt-in prototype: reclaim only clearly fake unmarked heads (null/heap/
+// implausible type pointers) after compaction.  Keep disabled by default.
+#ifndef MICROPY_GC_EXPERIMENTAL_RECLAIM
+#define MICROPY_GC_EXPERIMENTAL_RECLAIM (1)
+#endif
 
 // make this 1 to zero out swept memory to more eagerly
 // detect untraced object still in use
@@ -133,6 +150,7 @@ extern const mp_obj_type_t mp_type_pointer;
 // Static functions for individual steps of the GC mark/sweep sequence
 static void gc_collect_start_common(void);
 static void *gc_get_ptr(void **ptrs, int i);
+static size_t gc_forward_table_lookup(gc_forward_table_t *table, size_t old_block);
 #if MICROPY_GC_SPLIT_HEAP
 static void gc_mark_subtree(mp_state_mem_area_t *area, size_t block);
 #else
@@ -141,18 +159,34 @@ static void gc_mark_subtree(size_t block);
 static void gc_deal_with_stack_overflow(void);
 static void gc_sweep_run_finalisers(void);
 static void gc_sweep_free_blocks(void);
+#if MICROPY_GC_EXPERIMENTAL_RECLAIM
+static void gc_experimental_reclaim_fake_unmarked_heads(mp_state_mem_area_t *area);
+static bool gc_experimental_has_root_ref(void *target_ptr);
+static bool gc_experimental_has_heap_ref(mp_state_mem_area_t *target_area, size_t target_block, void *target_ptr);
+#endif
 static void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
 static void gc_compact_copy(mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
 static void gc_update_references(mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
 static void gc_update_roots(mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
+static void gc_update_raw_code_tree(mp_state_mem_area_t *area, gc_forward_table_t *forward_table, mp_raw_code_t *rc);
 static void gc_shift_left_frontier(mp_state_mem_area_t *area);
+static void gc_trace_pinned_runtime_tables(mp_state_mem_area_t *area);
+static void gc_trace_vm_codestate(const char *phase, mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
+static size_t gc_count_object_blocks(mp_state_mem_area_t *area, size_t head_block, size_t process_limit);
+static void gc_write_object_atb(mp_state_mem_area_t *area, size_t head_block, size_t block_count);
+static void gc_clear_object_atb(mp_state_mem_area_t *area, size_t head_block, size_t block_count);
+static bool gc_is_plausible_type_ptr(mp_state_mem_area_t *area, uintptr_t type_ptr);
+static bool gc_ptr_is_in_heap(void *ptr);
+static bool gc_rewrite_ptr_slot(void **slot, gc_forward_table_t *forward_table, size_t *slots_scanned, size_t *slots_rewritten, size_t *slots_nonheap);
+static size_t gc_rewrite_ptr_array(void **slots, size_t count, gc_forward_table_t *forward_table, size_t *slots_scanned, size_t *slots_rewritten, size_t *slots_nonheap);
 static void _gc_update_dict_values(mp_obj_dict_t *dict, mp_state_mem_area_t *area, gc_forward_table_t *forward_table);
-static void _gc_update_module_context_obj_table(mp_module_context_t *ctx, gc_forward_table_t *forward_table);
+static void _gc_update_list_items(mp_obj_list_t *list, gc_forward_table_t *forward_table);
+static void _gc_update_module_context_obj_table(mp_module_context_t *ctx, gc_forward_table_t *forward_table, size_t *slots_scanned, size_t *slots_rewritten, size_t *slots_nonheap);
 static void *gc_update_ptr(void *ptr, gc_forward_table_t *forward_table);
 //static size_t gc_count_marked_blocks(mp_state_mem_area_t *area);
 static size_t gc_count_live_objects(mp_state_mem_area_t *area);
 static bool gc_forward_table_prealloc(gc_forward_table_t *table, size_t size);
-
+static void gc_dump_occupied_blocks(mp_state_mem_area_t *area, bool after_compaction);
 
 // Pinned objects tracking
 static pinned_table_t gc_pinned_table = {NULL, 0, 0};
@@ -275,8 +309,13 @@ void gc_init(void *start, void *end) {
     MP_STATE_MEM(gc_alloc_amount) = 0;
     #endif
 
-    // Initialize pinned table with pre-allocated space to avoid realloc crashes
-    // DISABLED FOR DEBUGGING
+    // Initialize pinned table.  Use free() because gc_pin() now uses system
+    // realloc() for the ranges buffer (it must NOT live on the GC heap because
+    // compaction can move GC-heap allocations and gc_update_roots does not
+    // rewrite gc_pinned_table.ranges).
+    if (gc_pinned_table.ranges != NULL) {
+        free(gc_pinned_table.ranges);
+    }
     gc_pinned_table.capacity = 0;
     gc_pinned_table.count = 0;
     gc_pinned_table.ranges = NULL;
@@ -453,18 +492,27 @@ void gc_collect_start(void) {
     MP_STATE_MEM(gc_alloc_amount) = 0;
     #endif
 
-    // Pin all active execution frames. If a frame moves, the local C variables 
-    // (stack ptr, prog counter) in mp_execute_bytecode will become invalid.
-    #if MICROPY_PY_SYS_SETTRACE
+    // Pin all active execution frames. If a frame moves, local C variables
+    // (stack ptr, prog counter) in mp_execute_bytecode become stale.
     for (mp_code_state_t *cs = MP_STATE_THREAD(current_code_state); cs != NULL; ) {
         gc_pin(cs);
+
+        // VM keeps these as raw C pointers in locals during execution.
+        // Pin them so compaction cannot move targets while locals are live.
+        mp_obj_fun_bc_t *fun_bc = cs->fun_bc;
+        gc_pin(fun_bc);
+        if (fun_bc != NULL) {
+            gc_pin((void *)fun_bc->bytecode);
+            gc_pin((void *)fun_bc->child_table);
+            gc_pin((void *)fun_bc->context);
+        }
+
         #if MICROPY_STACKLESS
         cs = cs->prev;
         #else
         cs = cs->prev_state;
         #endif
     }
-    #endif
 
     // Trace root pointers.  This relies on the root pointers being organised
     // correctly in the mp_state_ctx structure.  We scan nlr_top, dict_locals,
@@ -490,6 +538,11 @@ void gc_collect_start(void) {
 
 static void gc_collect_start_common(void) {
     GC_ENTER();
+    #if READABLE_HEAP_DUMP
+    for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
+        gc_dump_occupied_blocks(area, false);
+    }
+    #endif
     assert((MP_STATE_THREAD(gc_lock_depth) & GC_COLLECT_FLAG) == 0);
     MP_STATE_THREAD(gc_lock_depth) |= GC_COLLECT_FLAG;
     MP_STATE_MEM(gc_stack_overflow) = 0;
@@ -513,6 +566,9 @@ void gc_collect_root(void **ptrs, size_t len) {
         }
         #endif
         size_t block = BLOCK_FROM_PTR(area, ptr);
+        while (block > 0 && ATB_GET_KIND(area, block) == AT_TAIL) {
+            block--;
+        }
         if (ATB_GET_KIND(area, block) == AT_HEAD) {
             // An unmarked head: mark it, and mark all its children
             ATB_HEAD_TO_MARK(area, block);
@@ -585,6 +641,9 @@ static void gc_mark_subtree(size_t block)
             mp_state_mem_area_t *ptr_area = area;
             #endif
             size_t ptr_block = BLOCK_FROM_PTR(ptr_area, ptr);
+            while (ptr_block > 0 && ATB_GET_KIND(ptr_area, ptr_block) == AT_TAIL) {
+                ptr_block--;
+            }
             if (ATB_GET_KIND(ptr_area, ptr_block) != AT_HEAD) {
                 // This block is already marked.
                 continue;
@@ -623,7 +682,11 @@ void gc_sweep_all(void) {
 }
 
 static bool gc_should_compact(void) {
+    #if MICROPY_VARIANT_BACKWARD_COMPATIBLE
+    return false;
+    #else
     return true;
+    #endif
 }
 
 // Shift the left frontier to reflect the actual compacted heap state
@@ -706,63 +769,131 @@ static void gc_verify_compacted_heap(mp_state_mem_area_t *area) {
 
 // Dump all occupied blocks in the heap after compaction
 __attribute__((unused))
-static void gc_dump_occupied_blocks(mp_state_mem_area_t *area) {
-    #if MICROPY_DEBUG_VERBOSE
-    printf("\n=== HEAP DUMP AFTER COMPACTION ===\n");
-    printf("area pointer = %p\n", (void *)area);
-    fflush(stdout);
-    
-    // Read gc_alloc_table_byte_len first and print it in different ways
+static void gc_dump_occupied_blocks(mp_state_mem_area_t *area, bool after_compaction) {
+    #if MICROPY_DEBUG_VERBOSE || READABLE_HEAP_DUMP
+    const char *phase = after_compaction ? "AFTER" : "BEFORE";
     size_t atb_len = area->gc_alloc_table_byte_len;
-    printf("area->gc_alloc_table_byte_len = " UINT_FMT " (hex: %lx)\n", atb_len, (unsigned long)atb_len);
-    printf("Raw bytes at &(area->gc_alloc_table_byte_len): %02x %02x %02x %02x %02x %02x %02x %02x\n",
-            ((uint8_t*)&area->gc_alloc_table_byte_len)[0],
-            ((uint8_t*)&area->gc_alloc_table_byte_len)[1],
-            ((uint8_t*)&area->gc_alloc_table_byte_len)[2],
-            ((uint8_t*)&area->gc_alloc_table_byte_len)[3],
-            ((uint8_t*)&area->gc_alloc_table_byte_len)[4],
-            ((uint8_t*)&area->gc_alloc_table_byte_len)[5],
-            ((uint8_t*)&area->gc_alloc_table_byte_len)[6],
-            ((uint8_t*)&area->gc_alloc_table_byte_len)[7]);
-    fflush(stdout);
-    
     if (atb_len == 0 || atb_len > 1000000) {
-        printf("ERROR: gc_alloc_table_byte_len is invalid (" UINT_FMT "), stopping dump\n", atb_len);
+        printf("\n=== HEAP SUMMARY %s COMPACTION ===\n", phase);
+        printf("area=%p invalid_atb_len=" UINT_FMT "\n\n", (void *)area, (mp_uint_t)atb_len);
         fflush(stdout);
         return;
     }
-    
-    size_t max_block = atb_len * BLOCKS_PER_ATB;
-    printf("max_block = " UINT_FMT "\n", max_block);
-    fflush(stdout);
-    
-    size_t dump_count = 0;
-    for (size_t block = 0; block < max_block && block < 100; block++) {
+
+    size_t process_limit = MIN(area->gc_num_blocks, atb_len * BLOCKS_PER_ATB);
+    size_t head_count = 0;
+    size_t tail_count = 0;
+    size_t mark_count = 0;
+    size_t free_count = 0;
+    size_t free_runs = 0;
+    size_t used_runs = 0;
+    size_t largest_free_run = 0;
+    size_t holes_in_left_prefix = 0;
+    size_t free_runs_left = 0;
+    size_t used_runs_left = 0;
+    size_t largest_free_left = 0;
+
+    // Compact run preview, e.g. H2 F5 M1 H3 ... (first 12 runs only).
+    char run_preview[256];
+    size_t run_preview_pos = 0;
+    size_t run_preview_count = 0;
+
+    size_t block = 0;
+    while (block < process_limit) {
         byte kind = ATB_GET_KIND(area, block);
-        if (kind == AT_FREE) {
-            printf("Block " UINT_FMT ": FREE\n", block);
-            dump_count++;
-        } else if (kind == AT_HEAD || kind == AT_MARK) {
-            size_t tail_count = 0;
-            size_t check_block = block + 1;
-            while (check_block < max_block && ATB_GET_KIND(area, check_block) == AT_TAIL) {
+        size_t run_start = block;
+        do {
+            if (kind == AT_HEAD) {
+                head_count++;
+            } else if (kind == AT_TAIL) {
                 tail_count++;
-                check_block++;
+            } else if (kind == AT_MARK) {
+                mark_count++;
+            } else {
+                free_count++;
             }
-            printf("Block " UINT_FMT ": %s tails=" UINT_FMT " total_blocks=" UINT_FMT "\n",
-                   block,
-                   kind == AT_HEAD ? "HEAD" : "MARK",
-                   tail_count,
-                   tail_count + 1);
-            dump_count++;
+            block++;
+        } while (block < process_limit && ATB_GET_KIND(area, block) == kind);
+
+        size_t run_len = block - run_start;
+        if (kind == AT_FREE) {
+            free_runs++;
+            if (run_len > largest_free_run) {
+                largest_free_run = run_len;
+            }
+        } else {
+            used_runs++;
+        }
+
+        if (run_preview_count < 12) {
+            char run_tag = kind == AT_FREE ? 'F' : (kind == AT_MARK ? 'M' : 'H');
+            int n = snprintf(run_preview + run_preview_pos, sizeof(run_preview) - run_preview_pos,
+                "%c" UINT_FMT "%s", run_tag, (mp_uint_t)run_len, run_preview_count == 11 ? "" : " ");
+            if (n > 0 && (size_t)n < sizeof(run_preview) - run_preview_pos) {
+                run_preview_pos += (size_t)n;
+            }
+            run_preview_count++;
         }
     }
-    printf("=== END HEAP DUMP (checked first 100 blocks, found " UINT_FMT ") ===\n\n", dump_count);
+
+    size_t left_prefix_end = MIN(area->gc_last_used_block_from_left + 1, process_limit);
+    if (left_prefix_end > 0) {
+        size_t i = 0;
+        while (i < left_prefix_end) {
+            byte kind = ATB_GET_KIND(area, i);
+            size_t run_start = i;
+            while (i < left_prefix_end && ATB_GET_KIND(area, i) == kind) {
+                if (kind == AT_FREE) {
+                    holes_in_left_prefix++;
+                }
+                i++;
+            }
+            size_t run_len = i - run_start;
+            if (kind == AT_FREE) {
+                free_runs_left++;
+                if (run_len > largest_free_left) {
+                    largest_free_left = run_len;
+                }
+            } else {
+                used_runs_left++;
+            }
+        }
+    }
+
+    size_t used_blocks = head_count + tail_count + mark_count;
+    size_t free_pct = process_limit == 0 ? 0 : (free_count * 100) / process_limit;
+
+    printf("\n=== HEAP SUMMARY %s COMPACTION ===\n", phase);
+    printf("area=%p blocks=" UINT_FMT " used=" UINT_FMT " free=" UINT_FMT " (" UINT_FMT "%%) heads=" UINT_FMT " marks=" UINT_FMT "\n",
+        (void *)area,
+        (mp_uint_t)process_limit,
+        (mp_uint_t)used_blocks,
+        (mp_uint_t)free_count,
+        (mp_uint_t)free_pct,
+        (mp_uint_t)head_count,
+        (mp_uint_t)mark_count);
+    printf("runs(total): used=" UINT_FMT " free=" UINT_FMT " largest_free=" UINT_FMT "\n",
+        (mp_uint_t)used_runs,
+        (mp_uint_t)free_runs,
+        (mp_uint_t)largest_free_run);
+    printf("runs(left): used=" UINT_FMT " free=" UINT_FMT " largest_free=" UINT_FMT " holes_in_prefix=" UINT_FMT "\n",
+        (mp_uint_t)used_runs_left,
+        (mp_uint_t)free_runs_left,
+        (mp_uint_t)largest_free_left,
+        (mp_uint_t)holes_in_left_prefix);
+    printf("frontiers: left=" UINT_FMT " right=" UINT_FMT "\n",
+        (mp_uint_t)area->gc_last_used_block_from_left,
+        (mp_uint_t)area->gc_last_used_block_from_right);
+    if (run_preview_pos > 0) {
+        printf("runs_preview: %s%s\n", run_preview, run_preview_count >= 12 ? "..." : "");
+    }
+    printf("\n");
     fflush(stdout);
     #endif
 }
 
 // Validate heap for consistency issues that indicate corruption
+__attribute__((unused))
 static bool gc_validate_heap_integrity(mp_state_mem_area_t *area, const char *checkpoint) {
     size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
     bool corruption = false;
@@ -809,15 +940,45 @@ void gc_collect_end(void) {
     DEBUG_printf("gc_collect_end: dealt with stack overflow\n");
 
     bool compaction_performed = gc_should_compact();
+
+    // Capture pre-sweep garbage diagnostics while AT_HEAD garbage still exists.
+    if (compaction_performed) {
+        #if !MICROPY_VARIANT_BACKWARD_COMPATIBLE
+        DEBUG_printf("gc_collect_end: pre-sweep diagnostics\n");
+        for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
+            gc_trace_pinned_runtime_tables(area);
+            gc_trace_vm_codestate("pre-sweep", area, NULL);
+        }
+        #endif
+    }
+
+    // ALWAYS run finalisers then sweep BEFORE compaction.
+    // gc_sweep_free_blocks() converts:
+    //   AT_MARK (live, reached by mark phase) -> AT_HEAD  (surviving objects)
+    //   AT_HEAD (garbage, not reached)        -> AT_FREE  (holes for compaction to fill)
+    // AT_FREE destination slots and moved nothing leading to unbounded heap growth.
+    DEBUG_printf("gc_collect_end: running finalisers\n");
+    gc_sweep_run_finalisers();
+    DEBUG_printf("gc_collect_end: freeing blocks (Sweep)\n");
+    gc_sweep_free_blocks();
+
+    if (compaction_performed) {
+        for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
+            gc_trace_vm_codestate("post-sweep", area, NULL);
+        }
+    }
+
     if (compaction_performed) {
         #if !MICROPY_VARIANT_BACKWARD_COMPATIBLE
         DEBUG_printf("gc_collect_end: starting compaction\n");
         for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
-            // Phase 0: Count live objects after sweep and pre-allocate forward table
+            // Phase 0: Count live objects (all AT_HEAD after sweep) and pre-allocate
+            // the forward table.
+            gc_trace_vm_codestate("phase0-pre-count", area, NULL);
             DEBUG_printf("gc_collect_end: About to count live objects\n");
             size_t live_count = gc_count_live_objects(area);
             DEBUG_printf("gc_collect_end: counted " UINT_FMT " live objects\n", live_count);
-            
+
             gc_forward_table_t forward_table = {0};
             DEBUG_printf("gc_collect_end: About to prealloc forward table (size " UINT_FMT ")\n", live_count);
             // SAFETY FIX: allocate with +1 capacity to avoid OBO at exact capacity boundary
@@ -826,15 +987,17 @@ void gc_collect_end(void) {
                 continue;
             }
             DEBUG_printf("gc_collect_end: Forward table prealloc complete\n");
-            
+
             DEBUG_printf("gc_collect_end: Phase 1 - computing forwarding addresses - area=%p\n", area);
             gc_compute_forwarding_addresses(area, &forward_table);
             DEBUG_printf("gc_collect_end: Phase 1 COMPLETE - forward_table has " UINT_FMT " entries (cap=" UINT_FMT ")\n", forward_table.count, forward_table.capacity);
+            gc_trace_vm_codestate("post-phase1-forward-map", area, &forward_table);
             gc_validate_heap_integrity(area, "after Phase 1");
-            
+
             DEBUG_printf("gc_collect_end: Phase 2 - copying objects\n");
             gc_compact_copy(area, &forward_table);
-            
+            gc_trace_vm_codestate("post-phase2-copy", area, &forward_table);
+
             // Verify stack is not corrupted by checking a known value
             volatile uint64_t stack_check = 0x0102030405060708ULL;
             if (stack_check != 0x0102030405060708ULL) {
@@ -843,7 +1006,9 @@ void gc_collect_end(void) {
 
             // Phase 3: Update internal object references
             gc_update_references(area, &forward_table);
+            gc_trace_vm_codestate("post-phase3-update-refs", area, &forward_table);
             gc_update_roots(area, &forward_table);
+            gc_trace_vm_codestate("post-phase3-update-roots", area, NULL);
             gc_shift_left_frontier(area);
             gc_forward_table_free(&forward_table);
 
@@ -852,10 +1017,14 @@ void gc_collect_end(void) {
         #endif
     }
 
-    DEBUG_printf("gc_collect_end: running finalisers\n");
-    gc_sweep_run_finalisers();
-    
-    DEBUG_printf("gc_collect_end: freeing blocks (Sweep)\n");
+    #if MICROPY_GC_EXPERIMENTAL_RECLAIM
+    if (compaction_performed) {
+        for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
+            gc_experimental_reclaim_fake_unmarked_heads(area);
+            gc_shift_left_frontier(area);
+        }
+    }
+    #endif
     
     // Finalize frontiers after the sweep has cleared garbage
     if (compaction_performed) {
@@ -883,9 +1052,9 @@ void gc_collect_end(void) {
     MP_STATE_THREAD(gc_lock_depth) &= ~GC_COLLECT_FLAG;
     
     DEBUG_printf("gc_collect_end: EXIT\n");
-    #if MICROPY_DEBUG_VERBOSE
+    #if MICROPY_DEBUG_VERBOSE || READABLE_HEAP_DUMP
     for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
-        gc_dump_occupied_blocks(area);
+        gc_dump_occupied_blocks(area, true);
     }
     #endif
     GC_EXIT();
@@ -1023,6 +1192,155 @@ static void gc_sweep_free_blocks(void) {
     }
 }
 
+#if MICROPY_GC_EXPERIMENTAL_RECLAIM
+static bool gc_experimental_has_root_ref(void *target_ptr) {
+    if (target_ptr == NULL) {
+        return false;
+    }
+
+    void **ptrs = (void **)(void *)&mp_state_ctx;
+    size_t root_start = offsetof(mp_state_ctx_t, thread.dict_locals);
+    size_t root_end = offsetof(mp_state_ctx_t, vm.qstr_last_chunk);
+    size_t root_slots = (root_end - root_start) / sizeof(void *);
+    void **roots = ptrs + root_start / sizeof(void *);
+    for (size_t i = 0; i < root_slots; ++i) {
+        if (roots[i] == target_ptr) {
+            return true;
+        }
+    }
+
+    #if MICROPY_ENABLE_PYSTACK
+    void **pystack_ptrs = (void **)(void *)MP_STATE_THREAD(pystack_start);
+    size_t pystack_len = (MP_STATE_THREAD(pystack_cur) - MP_STATE_THREAD(pystack_start)) / sizeof(void *);
+    for (size_t i = 0; i < pystack_len; ++i) {
+        if (pystack_ptrs[i] == target_ptr) {
+            return true;
+        }
+    }
+    #endif
+
+    return false;
+}
+
+static bool gc_experimental_has_heap_ref(mp_state_mem_area_t *target_area, size_t target_block, void *target_ptr) {
+    if (target_ptr == NULL) {
+        return false;
+    }
+
+    for (mp_state_mem_area_t *scan_area = &MP_STATE_MEM(area); scan_area != NULL; scan_area = NEXT_AREA(scan_area)) {
+        size_t process_limit = MIN(scan_area->gc_last_used_block + 1,
+                                   scan_area->gc_alloc_table_byte_len * BLOCKS_PER_ATB);
+        for (size_t block = 0; block < process_limit; ++block) {
+            byte kind = ATB_GET_KIND(scan_area, block);
+            if (kind != AT_HEAD && kind != AT_MARK) {
+                continue;
+            }
+
+            if (scan_area == target_area && block == target_block) {
+                size_t skip_blocks = gc_count_object_blocks(scan_area, block, process_limit);
+                block += skip_blocks - 1;
+                continue;
+            }
+
+            size_t block_count = gc_count_object_blocks(scan_area, block, process_limit);
+            size_t word_count = (block_count * BYTES_PER_BLOCK) / MP_BYTES_PER_OBJ_WORD;
+            void **words = (void **)PTR_FROM_BLOCK(scan_area, block);
+            for (size_t w = 0; w < word_count; ++w) {
+                if (words[w] == target_ptr) {
+                    return true;
+                }
+            }
+
+            block += block_count - 1;
+        }
+    }
+
+    return false;
+}
+
+static void gc_experimental_reclaim_fake_unmarked_heads(mp_state_mem_area_t *area) {
+    size_t reclaimed_heads = 0;
+    size_t reclaimed_blocks = 0;
+    size_t kept_heads = 0;
+    size_t kept_heap_type_heads = 0;
+    size_t kept_referenced_heads = 0;
+    size_t candidate_null_type = 0;
+    size_t candidate_implausible_type = 0;
+
+    size_t process_limit = MIN(area->gc_last_used_block + 1,
+                               area->gc_alloc_table_byte_len * BLOCKS_PER_ATB);
+
+    for (size_t block = 0; block < process_limit; ++block) {
+        if (ATB_GET_KIND(area, block) != AT_HEAD) {
+            continue;
+        }
+
+        if (gc_is_block_pinned(block)) {
+            kept_heads++;
+            continue;
+        }
+
+        mp_obj_base_t *base = (mp_obj_base_t *)PTR_FROM_BLOCK(area, block);
+        bool reclaim = false;
+        bool type_in_heap = false;
+
+        if (base->type == NULL) {
+            reclaim = true;
+            candidate_null_type++;
+        } else {
+            #if MICROPY_GC_SPLIT_HEAP
+            type_in_heap = (gc_get_ptr_area((void *)base->type) != NULL);
+            #else
+            type_in_heap = ((byte *)base->type >= (byte *)area->gc_pool_start
+                && (byte *)base->type < (byte *)area->gc_pool_end);
+            #endif
+
+            // Heap-resident type pointers are suspicious but can still appear in
+            // reachable stale payloads; keep them until we have stronger proof.
+            if (type_in_heap) {
+                kept_heap_type_heads++;
+            } else if (!gc_is_plausible_type_ptr(area, (uintptr_t)base->type)) {
+                reclaim = true;
+                candidate_implausible_type++;
+            }
+        }
+
+        if (!reclaim) {
+            kept_heads++;
+            continue;
+        }
+
+        void *obj_ptr = (void *)PTR_FROM_BLOCK(area, block);
+        if (gc_experimental_has_root_ref(obj_ptr) || gc_experimental_has_heap_ref(area, block, obj_ptr)) {
+            kept_referenced_heads++;
+            kept_heads++;
+            continue;
+        }
+
+        size_t block_count = gc_count_object_blocks(area, block, process_limit);
+        for (size_t i = 0; i < block_count; ++i) {
+            ATB_ANY_TO_FREE(area, block + i);
+            #if CLEAR_ON_SWEEP
+            memset((void *)PTR_FROM_BLOCK(area, block + i), 0, BYTES_PER_BLOCK);
+            #endif
+        }
+
+        reclaimed_heads++;
+        reclaimed_blocks += block_count;
+        block += block_count - 1;
+    }
+
+    DEBUG_printf("[reclaim-x] fake_unmarked heads=" UINT_FMT " blocks=" UINT_FMT " kept_heads=" UINT_FMT " kept_heap_type=" UINT_FMT " kept_referenced=" UINT_FMT " cand_null=" UINT_FMT " cand_implausible=" UINT_FMT "\n",
+        (mp_uint_t)reclaimed_heads,
+        (mp_uint_t)reclaimed_blocks,
+        (mp_uint_t)kept_heads,
+        (mp_uint_t)kept_heap_type_heads,
+        (mp_uint_t)kept_referenced_heads,
+        (mp_uint_t)candidate_null_type,
+        (mp_uint_t)candidate_implausible_type);
+}
+#endif
+
 // Address sanitizer needs to know that the access to ptrs[i] must always be
 // considered OK, even if it's a load from an address that would normally be
 // prohibited (due to being undefined, in a red zone, etc).
@@ -1037,6 +1355,198 @@ static void *gc_get_ptr(void **ptrs, int i) {
     #endif
     return ptrs[i];
 }
+
+// Conservative check used by compaction Phase 3 before scanning an allocation
+// as an mp_obj_t-bearing object. This avoids rewriting raw buffers (eg,
+// bytecode/data blobs) that happen to look pointer-like.
+__attribute__((unused))
+static bool gc_is_plausible_type_ptr(mp_state_mem_area_t *area, uintptr_t type_ptr) {
+    if (type_ptr == 0 || type_ptr < 0x100000) {
+        return false;
+    }
+    if ((type_ptr & (MP_BYTES_PER_OBJ_WORD - 1)) != 0) {
+        return false;
+    }
+
+    // Type pointers must not point into the GC heap.
+    #if MICROPY_GC_SPLIT_HEAP
+    if (gc_get_ptr_area((void *)type_ptr) != NULL) {
+        return false;
+    }
+    #else
+    if ((byte *)type_ptr >= (byte *)area->gc_pool_start && (byte *)type_ptr < (byte *)area->gc_pool_end) {
+        return false;
+    }
+    #endif
+
+    // Keep the check non-dereferencing and conservative: valid type objects are
+    // expected to live in roughly the same static address region as mp_type_type.
+    uintptr_t anchor = (uintptr_t)&mp_type_type;
+    #if UINTPTR_MAX > 0xffffffff
+    if (((type_ptr ^ anchor) >> 40) != 0) {
+        return false;
+    }
+    #else
+    if (((type_ptr ^ anchor) >> 20) != 0) {
+        return false;
+    }
+    #endif
+
+    // Validate that this really looks like a MicroPython type object.
+    const mp_obj_type_t *type = (const mp_obj_type_t *)type_ptr;
+    if (type->base.type != &mp_type_type) {
+        return false;
+    }
+    if (type->name == MP_QSTRnull) {
+        return false;
+    }
+
+    return true;
+}
+
+static void gc_update_ptr_field(mp_state_mem_area_t *area, gc_forward_table_t *forward_table, void **field) {
+    void *ref_ptr = *field;
+    if ((uintptr_t)ref_ptr < 0x100000) {
+        return;
+    }
+
+    mp_state_mem_area_t *ref_area = NULL;
+    #if MICROPY_GC_SPLIT_HEAP
+    ref_area = gc_get_ptr_area(ref_ptr);
+    #else
+    if ((byte *)ref_ptr >= (byte *)area->gc_pool_start && (byte *)ref_ptr < (byte *)area->gc_pool_end) {
+        ref_area = area;
+    }
+    #endif
+
+    if (ref_area == NULL) {
+        return;
+    }
+
+    // Forward table only stores HEAD blocks. If the field points into a TAIL
+    // block (eg. mp_obj_str_t.data), walk back to the allocation head first.
+    size_t raw_block = BLOCK_FROM_PTR(ref_area, ref_ptr);
+    size_t head_block = raw_block;
+    while (head_block > 0 && ATB_GET_KIND(ref_area, head_block) == AT_TAIL) {
+        head_block--;
+    }
+
+    size_t new_head = gc_forward_table_lookup(forward_table, head_block);
+    if (new_head != (size_t)-1 && new_head != head_block) {
+        uintptr_t offset = (uintptr_t)ref_ptr - (uintptr_t)PTR_FROM_BLOCK(ref_area, head_block);
+        *field = (void *)((uintptr_t)PTR_FROM_BLOCK(ref_area, new_head) + offset);
+    }
+}
+
+__attribute__((unused))
+static void gc_update_raw_code_ptr_array(mp_state_mem_area_t *area, gc_forward_table_t *forward_table, mp_raw_code_t **entries) {
+    if (entries == NULL) {
+        return;
+    }
+
+    size_t bytes = gc_nbytes(entries);
+    if (bytes == 0) {
+        return;
+    }
+
+    size_t count = bytes / sizeof(entries[0]);
+    for (size_t i = 0; i < count; ++i) {
+        gc_update_ptr_field(area, forward_table, (void **)&entries[i]);
+        gc_update_raw_code_tree(area, forward_table, entries[i]);
+    }
+}
+
+__attribute__((unused))
+static void gc_update_raw_code_tree(mp_state_mem_area_t *area, gc_forward_table_t *forward_table, mp_raw_code_t *rc) {
+    if (rc == NULL) {
+        return;
+    }
+
+    gc_update_ptr_field(area, forward_table, (void **)&rc->fun_data);
+    gc_update_ptr_field(area, forward_table, (void **)&rc->children);
+
+    if (rc->kind != MP_CODE_BYTECODE || rc->children == NULL) {
+        return;
+    }
+
+    size_t bytes = gc_nbytes(rc->children);
+    if (bytes == 0) {
+        return;
+    }
+
+    size_t count = bytes / sizeof(rc->children[0]);
+    for (size_t i = 0; i < count; ++i) {
+        gc_update_ptr_field(area, forward_table, (void **)&rc->children[i]);
+        gc_update_raw_code_tree(area, forward_table, rc->children[i]);
+    }
+}
+
+#if MICROPY_DEBUG_FUN_GC_TRACE
+static bool gc_trace_block_if_pinned_fun_ref(mp_state_mem_area_t *area, size_t block, const char **field_name, void **owner_out) {
+    for (size_t i = 0; i < gc_pinned_table.count; ++i) {
+        pinned_range_t *range = &gc_pinned_table.ranges[i];
+        if (range->obj == NULL) {
+            continue;
+        }
+        mp_obj_base_t *base = (mp_obj_base_t *)range->obj;
+        if (base->type != &mp_type_fun_bc) {
+            continue;
+        }
+        mp_obj_fun_bc_t *fun = (mp_obj_fun_bc_t *)range->obj;
+        bool bytecode_in_area = false;
+        if (fun->bytecode != NULL) {
+            #if MICROPY_GC_SPLIT_HEAP
+            bytecode_in_area = gc_get_ptr_area((void *)fun->bytecode) == area;
+            #else
+            bytecode_in_area = VERIFY_PTR((void *)fun->bytecode);
+            #endif
+        }
+        if (bytecode_in_area) {
+            size_t fun_block = BLOCK_FROM_PTR(area, fun->bytecode);
+            if (fun_block == block) {
+                *field_name = "bytecode";
+                *owner_out = fun;
+                return true;
+            }
+        }
+        bool child_table_in_area = false;
+        if (fun->child_table != NULL) {
+            #if MICROPY_GC_SPLIT_HEAP
+            child_table_in_area = gc_get_ptr_area((void *)fun->child_table) == area;
+            #else
+            child_table_in_area = VERIFY_PTR((void *)fun->child_table);
+            #endif
+        }
+        if (child_table_in_area) {
+            size_t child_block = BLOCK_FROM_PTR(area, fun->child_table);
+            if (child_block == block) {
+                *field_name = "child_table";
+                *owner_out = fun;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static void gc_trace_raw_fun_ref(const char *phase, mp_state_mem_area_t *area, size_t old_block, size_t new_block, size_t block_count) {
+    const char *field_name = NULL;
+    void *owner = NULL;
+    if (gc_trace_block_if_pinned_fun_ref(area, old_block, &field_name, &owner)) {
+        printf("[fun-trace] %s raw-ref owner=%p field=%s old_block=%u new_block=%u blocks=%u old_ptr=%p new_ptr=%p\n",
+            phase,
+            owner,
+            field_name,
+            (unsigned)old_block,
+            (unsigned)new_block,
+            (unsigned)block_count,
+            (void *)PTR_FROM_BLOCK(area, old_block),
+            (void *)PTR_FROM_BLOCK(area, new_block));
+    }
+}
+#else
+#define gc_trace_raw_fun_ref(...) (void)0
+#endif
 
 void gc_info(gc_info_t *info) {
     GC_ENTER();
@@ -1592,11 +2102,12 @@ void *gc_realloc(void *ptr_in, size_t n_bytes, bool allow_move) {
     size_t new_blocks = (n_bytes + BYTES_PER_BLOCK - 1) / BYTES_PER_BLOCK;
 
     // Get the total number of consecutive blocks that are already allocated to
-    // this chunk of memory, and then count the number of free blocks following
-    // it.  Stop if we reach the end of the heap, or if we find enough extra
-    // free blocks to satisfy the realloc.  Note that we need to compute the
-    // total size of the existing memory chunk so we can correctly and
-    // efficiently shrink it (see below for shrinking code).
+    // this chunk of memory. Then count the number of free blocks following it.
+    // Stop if we reach the end of the heap, OR if we find enough extra
+    // free blocks to satisfy the realloc.
+    // 
+    // Note: We need to compute the total size of the existing memory 
+    // chunk so we can correctly and efficiently shrink it.
     size_t n_free = 0;
     size_t n_blocks = 1; // counting HEAD block
     size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
@@ -1888,26 +2399,25 @@ void gc_pin(void* ptr) {
         return;  // Already pinned
     }
 
-    // Check if we need to expand the table
+    // Check if we need to expand the table.
+    // Use system malloc/realloc (not GC heap) so that compaction never moves
+    // this buffer - gc_update_roots does not rewrite gc_pinned_table.ranges.
     bool needs_expansion = gc_pinned_table.count >= gc_pinned_table.capacity;
     if (needs_expansion) {
-        size_t new_capacity = gc_pinned_table.capacity == 0 ? 
-                               PINNED_TABLE_INITIAL_CAPACITY : 
+        size_t new_capacity = gc_pinned_table.capacity == 0 ?
+                               PINNED_TABLE_INITIAL_CAPACITY :
                                gc_pinned_table.capacity * 2;
-        size_t old_size = gc_pinned_table.capacity * sizeof(pinned_range_t);
         size_t new_size = new_capacity * sizeof(pinned_range_t);
-        
-        // Keep mutex held during realloc to prevent GC from moving objects while we're pinning
-        pinned_range_t *new_ranges = (pinned_range_t *)m_realloc(gc_pinned_table.ranges, 
-                                                                  old_size, new_size);
+
+        pinned_range_t *new_ranges = (pinned_range_t *)realloc(gc_pinned_table.ranges, new_size);
         if (new_ranges == NULL) {
             GC_EXIT();
             return;  // Allocation failed
         }
-        
+
         gc_pinned_table.ranges = new_ranges;
         gc_pinned_table.capacity = new_capacity;
-        
+
         // Re-check if already pinned (another thread might have pinned it)
         if (gc_pinned_find_range_by_ptr(ptr) != -1) {
             GC_EXIT();
@@ -2043,7 +2553,7 @@ remove_entry:
 
 // Function to insert a forwarding entry 
 __attribute__((unused))
-static bool gc_forward_table_insert(gc_forward_table_t *table, size_t old_block, size_t new_block) {
+static bool gc_forward_table_insert(gc_forward_table_t *table, size_t old_block, size_t new_block, size_t n_blocks) {
     if (table->count >= table->capacity) {
         DEBUG_printf("gc_forward_table_insert: ERROR - table FULL! count=" UINT_FMT " capacity=" UINT_FMT "\n", 
                      table->count, table->capacity);
@@ -2052,6 +2562,7 @@ static bool gc_forward_table_insert(gc_forward_table_t *table, size_t old_block,
 
     table->entries[table->count].old_block = old_block;
     table->entries[table->count].new_block = new_block;
+    table->entries[table->count].n_blocks = n_blocks;
     table->count++;
     return true;
 }
@@ -2130,415 +2641,1177 @@ static bool gc_forward_table_prealloc(gc_forward_table_t *table, size_t size) {
     return true;
 }
 
+static bool gc_trace_ptr_in_area(mp_state_mem_area_t *area, const void *ptr, size_t *head_block_out, size_t *offset_out, byte *kind_out) {
+    if (ptr == NULL) {
+        return false;
+    }
+
+    void *clean_ptr = (void *)((uintptr_t)ptr & ~(uintptr_t)3);
+
+    #if MICROPY_GC_SPLIT_HEAP
+    if (gc_get_ptr_area(clean_ptr) != area) {
+        return false;
+    }
+    #else
+    if ((byte *)clean_ptr < (byte *)area->gc_pool_start || (byte *)clean_ptr >= (byte *)area->gc_pool_end) {
+        return false;
+    }
+    #endif
+
+    size_t raw_block = BLOCK_FROM_PTR(area, clean_ptr);
+    size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
+    if (raw_block >= max_block) {
+        return false;
+    }
+
+    size_t head_block = raw_block;
+    while (head_block > 0 && ATB_GET_KIND(area, head_block) == AT_TAIL) {
+        --head_block;
+    }
+
+    byte kind = ATB_GET_KIND(area, head_block);
+    uintptr_t base = (uintptr_t)PTR_FROM_BLOCK(area, head_block);
+    uintptr_t p = (uintptr_t)clean_ptr;
+
+    if (head_block_out != NULL) {
+        *head_block_out = head_block;
+    }
+    if (offset_out != NULL) {
+        *offset_out = (size_t)(p - base);
+    }
+    if (kind_out != NULL) {
+        *kind_out = kind;
+    }
+    return true;
+}
+
+__attribute__((unused))
+static void *gc_trace_map_ptr(mp_state_mem_area_t *area, gc_forward_table_t *forward_table, void *ptr) {
+    if (ptr == NULL || forward_table == NULL) {
+        return ptr;
+    }
+
+    size_t head_block;
+    size_t offset;
+    byte kind;
+    if (!gc_trace_ptr_in_area(area, ptr, &head_block, &offset, &kind)) {
+        return ptr;
+    }
+
+    size_t new_head = gc_forward_table_lookup(forward_table, head_block);
+    if (new_head == (size_t)-1) {
+        return ptr;
+    }
+
+    return (void *)((uintptr_t)PTR_FROM_BLOCK(area, new_head) + offset);
+}
+
+__attribute__((unused))
+static uint32_t gc_trace_hash_bytes(const byte *data, size_t len) {
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < len; ++i) {
+        hash ^= data[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static void gc_trace_vm_codestate(const char *phase, mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
+    #if MICROPY_DEBUG_VERBOSE
+    static bool printed_note = false;
+    if (!printed_note) {
+        DEBUG_printf("[vmtrace] note opcode dispatch table is static code in vm.c (not GC heap managed)\n");
+        printed_note = true;
+    }
+
+    mp_code_state_t *cs = MP_STATE_THREAD(current_code_state);
+    if (cs == NULL) {
+        DEBUG_printf("[vmtrace] %s area=%p no_active_code_state\n", phase, area);
+        return;
+    }
+
+    size_t depth = 0;
+    while (cs != NULL && depth < 24) {
+        mp_obj_fun_bc_t *fun = cs->fun_bc;
+        bool fun_valid = false;
+        const byte *bytecode = NULL;
+        void *child_table = NULL;
+
+        if (fun != NULL && gc_ptr_is_in_heap(fun) && gc_is_valid_ptr(fun)) {
+            fun_valid = true;
+            bytecode = fun->bytecode;
+            child_table = (void *)fun->child_table;
+        }
+
+        size_t fun_head = 0;
+        size_t fun_ofs = 0;
+        byte fun_kind = AT_FREE;
+        bool fun_in_area = gc_trace_ptr_in_area(area, fun, &fun_head, &fun_ofs, &fun_kind);
+
+        size_t bc_head = 0;
+        size_t bc_ofs = 0;
+        byte bc_kind = AT_FREE;
+        bool bc_in_area = gc_trace_ptr_in_area(area, bytecode, &bc_head, &bc_ofs, &bc_kind);
+
+        size_t ip_head = 0;
+        size_t ip_ofs = 0;
+        byte ip_kind = AT_FREE;
+        bool ip_in_area = gc_trace_ptr_in_area(area, cs->ip, &ip_head, &ip_ofs, &ip_kind);
+
+        void *fun_new = gc_trace_map_ptr(area, forward_table, fun);
+        void *bc_new = gc_trace_map_ptr(area, forward_table, (void *)bytecode);
+        void *ip_new = gc_trace_map_ptr(area, forward_table, (void *)cs->ip);
+        void *sp_new = gc_trace_map_ptr(area, forward_table, (void *)cs->sp);
+
+        uint32_t bc_hash = 0;
+        size_t bc_hash_len = 0;
+        if (bc_in_area && (bc_kind == AT_HEAD || bc_kind == AT_MARK || bc_kind == AT_TAIL)) {
+            size_t max_bytes = (size_t)((byte *)area->gc_pool_end - (const byte *)bytecode);
+            bc_hash_len = max_bytes > 16 ? 16 : max_bytes;
+            bc_hash = gc_trace_hash_bytes(bytecode, bc_hash_len);
+        }
+
+        unsigned op = 0xff;
+        if (ip_in_area && (ip_kind == AT_HEAD || ip_kind == AT_MARK || ip_kind == AT_TAIL)) {
+            op = (unsigned)(*cs->ip);
+        }
+
+        bool rel_ip_valid = false;
+        mp_uint_t rel_ip = 0;
+        if (bytecode != NULL && cs->ip != NULL) {
+            rel_ip_valid = true;
+            rel_ip = (mp_uint_t)((uintptr_t)cs->ip - (uintptr_t)bytecode);
+        }
+
+        size_t n_exc_stack = 0;
+        size_t active_exc = 0;
+        const byte *top_handler = NULL;
+        void *top_handler_new = NULL;
+        unsigned top_handler_op = 0xff;
+        if (bytecode != NULL) {
+            const byte *prelude_ptr = bytecode;
+            size_t n_state_unused, scope_flags, n_pos_args, n_kwonly_args, n_def_pos_args;
+            MP_BC_PRELUDE_SIG_DECODE_INTO(prelude_ptr, n_state_unused, n_exc_stack, scope_flags, n_pos_args, n_kwonly_args, n_def_pos_args);
+            (void)n_state_unused;
+            (void)scope_flags;
+            (void)n_pos_args;
+            (void)n_kwonly_args;
+            (void)n_def_pos_args;
+            active_exc = cs->exc_sp_idx;
+            if (active_exc > n_exc_stack) {
+                active_exc = n_exc_stack;
+            }
+            if (active_exc > 0) {
+                mp_exc_stack_t *exc_state = (mp_exc_stack_t *)(void *)(cs->state + cs->n_state);
+                top_handler = exc_state[active_exc - 1].handler;
+                top_handler_new = gc_trace_map_ptr(area, forward_table, (void *)top_handler);
+                if (top_handler != NULL && gc_trace_ptr_in_area(area, (void *)top_handler, NULL, NULL, NULL)) {
+                    top_handler_op = (unsigned)(*top_handler);
+                }
+            }
+        }
+
+        DEBUG_printf("[vmtrace] %s area=%p depth=" UINT_FMT " cs=%p prev=%p fun=%p", phase, area,
+            (mp_uint_t)depth, cs, cs->prev_state, fun);
+        if (fun_in_area) {
+            DEBUG_printf(" fun_head=" UINT_FMT "+" UINT_FMT " fun_kind=%u",
+                (mp_uint_t)fun_head,
+                (mp_uint_t)fun_ofs,
+                (unsigned)fun_kind);
+        }
+        DEBUG_printf(" fun_new=%p fun_valid=%d bc=%p", fun_new, (int)fun_valid, bytecode);
+        if (bc_in_area) {
+            DEBUG_printf(" bc_head=" UINT_FMT "+" UINT_FMT " bc_kind=%u",
+                (mp_uint_t)bc_head,
+                (mp_uint_t)bc_ofs,
+                (unsigned)bc_kind);
+        }
+        DEBUG_printf(" bc_new=%p bc_hash=" UINT_FMT "/" UINT_FMT,
+            bc_new,
+            (mp_uint_t)bc_hash,
+            (mp_uint_t)bc_hash_len);
+        DEBUG_printf(" ip=%p", cs->ip);
+        if (ip_in_area) {
+            DEBUG_printf(" ip_head=" UINT_FMT "+" UINT_FMT " ip_kind=%u",
+                (mp_uint_t)ip_head,
+                (mp_uint_t)ip_ofs,
+                (unsigned)ip_kind);
+        }
+        DEBUG_printf(" ip_new=%p", ip_new);
+        if (rel_ip_valid) {
+            DEBUG_printf(" ip_rel=" UINT_FMT, rel_ip);
+        } else {
+            DEBUG_printf(" ip_rel=-");
+        }
+        DEBUG_printf(" op=" UINT_FMT " exc=" UINT_FMT "/" UINT_FMT " handler=%p handler_new=%p h_op=" UINT_FMT " sp=%p sp_new=%p child=%p\n",
+            (mp_uint_t)op,
+            (mp_uint_t)active_exc,
+            (mp_uint_t)n_exc_stack,
+            top_handler,
+            top_handler_new,
+            (mp_uint_t)top_handler_op,
+            cs->sp,
+            sp_new,
+            child_table);
+
+        cs = cs->prev_state;
+        ++depth;
+    }
+
+    if (cs != NULL) {
+        DEBUG_printf("[vmtrace] %s area=%p code_state_chain_truncated_at_24\n", phase, area);
+    }
+    #else
+    (void)phase;
+    (void)area;
+    (void)forward_table;
+    #endif
+}
+
 // Maps old block positions to new compacted positions
 __attribute__((unused))
-static void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) { 
-    if (forward_table->entries == NULL || forward_table->capacity == 0) {
-        DEBUG_printf("gc_compute_forwarding_addresses: forward table not pre-allocated\n");
-        return;
-    }
+static void gc_trace_pinned_runtime_tables(mp_state_mem_area_t *area) {
+    size_t child_seen = 0;
+    size_t child_pinned = 0;
+    size_t obj_seen = 0;
+    size_t obj_pinned = 0;
+    size_t qstr_seen = 0;
+    size_t qstr_pinned = 0;
 
-    // Two-pointer planner:
-    // - Read pointer scans live objects from left to right.
-    // - Write pointer searches for FREE runs strictly before the current object.
-    // This guarantees we only move objects into holes that are already free,
-    // and never into pinned blocks.
-    size_t write_ptr = 0;
     size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
-    size_t process_limit = MIN(area->gc_num_blocks, max_block);
+    for (size_t block = area->gc_last_used_block; block <= max_block; ++block) {
+        byte kind = ATB_GET_KIND(area, block);
+        if (kind != AT_HEAD && kind != AT_MARK) {
+            continue;
+        }
 
-    for (size_t block = 0; block < process_limit; block++) {
-        byte block_kind = ATB_GET_KIND(area, block);
+        mp_obj_base_t *base = (mp_obj_base_t *)PTR_FROM_BLOCK(area, block);
+        if (base->type == NULL) {
+            continue;
+        }
 
-        if (block_kind == AT_HEAD || block_kind == AT_MARK) {
-            size_t block_count = 1;
-            size_t next_block = block + 1;
-            while (next_block < max_block && ATB_GET_KIND(area, next_block) == AT_TAIL) {
-                block_count++;
-                next_block++;
-            }
-
-            bool is_pinned = gc_is_block_pinned(block);
-            if (is_pinned) {
-                if (!gc_forward_table_insert(forward_table, block, block)) {
-                    DEBUG_printf("gc_compute_forwarding_addresses: failed to insert pinned object at block " UINT_FMT "\n", block);
-                    gc_forward_table_free(forward_table);
-                    return;
-                }
-            } else {
-                size_t new_block = block;
-
-                if (write_ptr < block) {
-                    size_t candidate = write_ptr;
-                    while (candidate + block_count <= block) {
-                        bool can_place = true;
-                        for (size_t i = 0; i < block_count; i++) {
-                            size_t b = candidate + i;
-                            if (ATB_GET_KIND(area, b) != AT_FREE || gc_is_block_pinned(b)) {
-                                can_place = false;
-                                candidate = b + 1;
-                                break;
-                            }
-                        }
-                        if (can_place) {
-                            new_block = candidate;
-                            break;
-                        }
-                    }
-                }
-
-                if (new_block + block_count > area->gc_last_used_block_from_right) {
-                    DEBUG_printf("gc_compute: collision at block " UINT_FMT ": destination crosses right frontier\n", block);
-                    gc_forward_table_free(forward_table);
-                    return;
-                }
-
-                if (!gc_forward_table_insert(forward_table, block, new_block)) {
-                    DEBUG_printf("gc_compute_forwarding_addresses: failed to insert mapping for block " UINT_FMT "\n", block);
-                    gc_forward_table_free(forward_table);
-                    return;
-                }
-
-                if (new_block + block_count > write_ptr) {
-                    write_ptr = new_block + block_count;
+        if (base->type == &mp_type_fun_bc) {
+            mp_obj_fun_bc_t *fun = (mp_obj_fun_bc_t *)base;
+            if (fun->child_table != NULL) {
+                ++child_seen;
+                if (gc_is_pinned((void *)fun->child_table)) {
+                    ++child_pinned;
+                } else {
+                    DEBUG_printf("[pin-check] WARN child_table unpinned fun=%p table=%p\n", fun, fun->child_table);
                 }
             }
-
-            block = next_block - 1;
+        } else if (base->type == &mp_type_module) {
+            mp_module_context_t *ctx = (mp_module_context_t *)base;
+            if (ctx->constants.obj_table != NULL) {
+                ++obj_seen;
+                if (gc_is_pinned(ctx->constants.obj_table)) {
+                    ++obj_pinned;
+                } else {
+                    DEBUG_printf("[pin-check] WARN obj_table unpinned module_ctx=%p table=%p\n", ctx, ctx->constants.obj_table);
+                }
+            }
+            #if MICROPY_EMIT_BYTECODE_USES_QSTR_TABLE
+            if (ctx->constants.qstr_table != NULL) {
+                ++qstr_seen;
+                if (gc_is_pinned((void *)ctx->constants.qstr_table)) {
+                    ++qstr_pinned;
+                } else {
+                    DEBUG_printf("[pin-check] WARN qstr_table unpinned module_ctx=%p table=%p\n", ctx, ctx->constants.qstr_table);
+                }
+            }
+            #endif
         }
     }
 
-    DEBUG_printf("gc_compute_forwarding_addresses: planned " UINT_FMT " moves\n", forward_table->count);
+    DEBUG_printf("[pin-check] child_table pinned=" UINT_FMT "/" UINT_FMT " obj_table pinned=" UINT_FMT "/" UINT_FMT,
+        (mp_uint_t)child_pinned,
+        (mp_uint_t)child_seen,
+        (mp_uint_t)obj_pinned,
+        (mp_uint_t)obj_seen);
+    #if MICROPY_EMIT_BYTECODE_USES_QSTR_TABLE
+    DEBUG_printf(" qstr_table pinned=" UINT_FMT "/" UINT_FMT,
+        (mp_uint_t)qstr_pinned,
+        (mp_uint_t)qstr_seen);
+    #endif
+    DEBUG_printf("\n");
 }
 
-// Updates allocation table for new block positions with bi-directional move ordering
+typedef struct {
+    void *type;
+    size_t count;
+    size_t pinned_count;
+    size_t blocks_total;
+    size_t mark_ref_slots;
+} gc_diag_unmarked_type_bucket_t;
+
 __attribute__((unused))
-static void gc_compact_copy(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
-    
-    if (forward_table == NULL || forward_table->entries == NULL || forward_table->count == 0) {
+static const char *gc_diag_type_name(mp_state_mem_area_t *area, void *type_ptr) {
+    if (type_ptr == NULL) {
+        return "<null>";
+    }
+
+    uintptr_t tp = (uintptr_t)type_ptr;
+    if (gc_is_plausible_type_ptr(area, tp)) {
+        const mp_obj_type_t *type = (const mp_obj_type_t *)tp;
+        return qstr_str(type->name);
+    }
+
+    #if MICROPY_GC_SPLIT_HEAP
+    if (gc_get_ptr_area(type_ptr) != NULL) {
+        return "<heap-ptr>";
+    }
+    #else
+    if ((byte *)type_ptr >= (byte *)area->gc_pool_start && (byte *)type_ptr < (byte *)area->gc_pool_end) {
+        return "<heap-ptr>";
+    }
+    #endif
+
+    return "<weird>";
+}
+
+__attribute__((unused))
+static size_t gc_diag_find_or_add_type_bucket(gc_diag_unmarked_type_bucket_t *buckets, size_t bucket_count, void *type) {
+    for (size_t i = 0; i < bucket_count; ++i) {
+        if (buckets[i].type == type) {
+            return i;
+        }
+    }
+    for (size_t i = 0; i < bucket_count; ++i) {
+        if (buckets[i].type == NULL) {
+            buckets[i].type = type;
+            return i;
+        }
+    }
+    return (size_t)-1;
+}
+
+// ============================================================================
+// PHASE 1: Compute Forwarding Addresses (Plan Compaction)
+// ============================================================================
+// SPECIAL CASES:
+//   - Don't move pinned blocks (use gc_is_block_pinned() to check)
+//   - Multi-block objects must stay contiguous
+//   - Can't move if destination crosses gc_last_used_block_from_right
+//   - Bytecode/dispatch tables should be pinned
+__attribute__((unused))
+static void gc_compute_forwarding_addresses(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
+    if (area == NULL || forward_table == NULL || forward_table->entries == NULL || forward_table->capacity == 0) {
+        DEBUG_printf("[phase1] invalid args: area=%p table=%p entries=%p cap=" UINT_FMT "\n",
+            area,
+            forward_table,
+            forward_table ? (void *)forward_table->entries : NULL,
+            (mp_uint_t)(forward_table ? forward_table->capacity : 0));
         return;
     }
 
     size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
     size_t process_limit = MIN(area->gc_num_blocks, max_block);
-    size_t compacted_frontier = 0;
-    
-    // ============ PASS 1: Process DOWN-moves in FORWARD order ============
-    size_t pass1_count = 0;
+    // gc_last_used_block_from_right is an inclusive block index.
+    size_t right_exclusive = area->gc_last_used_block_from_right + 1;
+    if (right_exclusive > process_limit) {
+        right_exclusive = process_limit;
+    }
+    size_t write_ptr = 0;
+    size_t object_count = 0;
+    size_t skipped_right_count = 0;
+    size_t skipped_right_first = 0;
+    size_t skipped_right_last = 0;
 
     for (size_t block = 0; block < process_limit; block++) {
         byte block_kind = ATB_GET_KIND(area, block);
-        if (block_kind != AT_HEAD && block_kind != AT_MARK) continue;
+        if (block_kind != AT_HEAD && block_kind != AT_MARK) {
+            continue;
+        }
 
         size_t block_count = 1;
         size_t next_block = block + 1;
-        while (next_block < max_block && ATB_GET_KIND(area, next_block) == AT_TAIL) {
+        while (next_block < process_limit && ATB_GET_KIND(area, next_block) == AT_TAIL) {
             block_count++;
             next_block++;
         }
 
         bool is_pinned = gc_is_block_pinned(block);
-        if (is_pinned) {
-            if (block_kind == AT_MARK) {
-                ATB_MARK_TO_HEAD(area, block);
-                for (size_t i = block + 1; i < block + block_count; i++) {
-                    ATB_MARK_TO_TAIL(area, i);
-                }
+
+        // Do not compact objects at/after the right frontier. They belong to
+        // the non-compacted right segment for this cycle.
+        if (block >= right_exclusive) {
+            if (skipped_right_count == 0) {
+                skipped_right_first = block;
             }
-            compacted_frontier = MAX(compacted_frontier, block + block_count);
+            skipped_right_last = block;
+            skipped_right_count++;
             block = next_block - 1;
             continue;
         }
 
-        size_t new_block = gc_forward_table_lookup(forward_table, block);
-        if (new_block == (size_t)-1 || new_block == block) {
-            if (block_kind == AT_MARK) {
-                ATB_MARK_TO_HEAD(area, block);
-                for (size_t i = block + 1; i < block + block_count; i++) {
-                    ATB_MARK_TO_TAIL(area, i);
+        size_t new_block = block;
+
+        if (!is_pinned && write_ptr < block) {
+            size_t candidate = write_ptr;
+            while (candidate + block_count <= block) {
+                bool can_place = true;
+                for (size_t i = 0; i < block_count; i++) {
+                    size_t b = candidate + i;
+                    if (ATB_GET_KIND(area, b) != AT_FREE || gc_is_block_pinned(b)) {
+                        can_place = false;
+                        candidate = b + 1;
+                        break;
+                    }
+                }
+                if (can_place) {
+                    new_block = candidate;
+                    break;
                 }
             }
-            compacted_frontier = MAX(compacted_frontier, block + block_count);
-            block = next_block - 1;
-            continue;
         }
 
-        // PASS 1: Only process DOWN-moves (new_block < block)
-        if (new_block >= block) {
-            block = next_block - 1;
-            continue;  // Save for pass 2
+        if (new_block + block_count > right_exclusive) {
+            DEBUG_printf("[phase1] ERROR destination out of right bound old=" UINT_FMT " new=" UINT_FMT " count=" UINT_FMT " right_inclusive=" UINT_FMT " right_exclusive=" UINT_FMT "\n",
+                (mp_uint_t)block,
+                (mp_uint_t)new_block,
+                (mp_uint_t)block_count,
+                (mp_uint_t)area->gc_last_used_block_from_right,
+                (mp_uint_t)right_exclusive);
+            return;
         }
 
-        // Perform the DOWN-move
-        byte *src = (byte *)PTR_FROM_BLOCK(area, block);
-        byte *dst = (byte *)PTR_FROM_BLOCK(area, new_block);
-        size_t copy_size = block_count * BYTES_PER_BLOCK;
-        
-        memmove(dst, src, copy_size);
-
-        // Clear old location
-        for (size_t i = 0; i < block_count; i++) {
-            ATB_ANY_TO_FREE(area, block + i);
+        if (!gc_forward_table_insert(forward_table, block, new_block, block_count)) {
+            DEBUG_printf("[phase1] ERROR insert failed old=" UINT_FMT " new=" UINT_FMT " count=" UINT_FMT " table_count=" UINT_FMT " cap=" UINT_FMT "\n",
+                (mp_uint_t)block,
+                (mp_uint_t)new_block,
+                (mp_uint_t)block_count,
+                (mp_uint_t)forward_table->count,
+                (mp_uint_t)forward_table->capacity);
+            return;
         }
 
-        // Mark new location
-        ATB_FREE_TO_HEAD(area, new_block);
-        for (size_t i = new_block + 1; i < new_block + block_count; i++) {
-            ATB_FREE_TO_TAIL(area, i);
+        if (new_block + block_count > write_ptr) {
+            write_ptr = new_block + block_count;
         }
 
-        compacted_frontier = MAX(compacted_frontier, new_block + block_count);
-        pass1_count++;
+        object_count++;
         block = next_block - 1;
     }
-    size_t pass2_count = 0;
 
-    // Reverse iteration: start from end, go backwards
-    for (ssize_t idx = (ssize_t)process_limit - 1; idx >= 0; idx--) {
-        size_t block = (size_t)idx;
-        byte block_kind = ATB_GET_KIND(area, block);
-        if (block_kind != AT_HEAD && block_kind != AT_MARK) continue;
-
-        size_t block_count = 1;
-        size_t next_block = block + 1;
-        while (next_block < max_block && ATB_GET_KIND(area, next_block) == AT_TAIL) {
-            block_count++;
-            next_block++;
-        }
-
-        bool is_pinned = gc_is_block_pinned(block);
-        if (is_pinned) {
-            if (block_kind == AT_MARK) {
-                ATB_MARK_TO_HEAD(area, block);
-                for (size_t i = block + 1; i < block + block_count; i++) {
-                    ATB_MARK_TO_TAIL(area, i);
-                }
-            }
-            compacted_frontier = MAX(compacted_frontier, block + block_count);
-            continue;
-        }
-
-        size_t new_block = gc_forward_table_lookup(forward_table, block);
-        if (new_block == (size_t)-1 || new_block == block) {
-            if (block_kind == AT_MARK) {
-                ATB_MARK_TO_HEAD(area, block);
-                for (size_t i = block + 1; i < block + block_count; i++) {
-                    ATB_MARK_TO_TAIL(area, i);
-                }
-            }
-            compacted_frontier = MAX(compacted_frontier, block + block_count);
-            continue;
-        }
-
-        // PASS 2: Only process UP-moves (new_block > block) - already moved down objects will have cleared their old space
-        if (new_block < block) {
-            continue;  // Already processed in pass 1
-        }
-
-        // Perform the UP-move
-        byte *src = (byte *)PTR_FROM_BLOCK(area, block);
-        byte *dst = (byte *)PTR_FROM_BLOCK(area, new_block);
-        size_t copy_size = block_count * BYTES_PER_BLOCK;
-
-        memmove(dst, src, copy_size);
-
-        // Clear old location
-        for (size_t i = 0; i < block_count; i++) {
-            ATB_ANY_TO_FREE(area, block + i);
-        }
-
-        // Mark new location
-        ATB_FREE_TO_HEAD(area, new_block);
-        for (size_t i = new_block + 1; i < new_block + block_count; i++) {
-            ATB_FREE_TO_TAIL(area, i);
-        }
-
-        compacted_frontier = MAX(compacted_frontier, new_block + block_count);
-        pass2_count++;
+    if (skipped_right_count > 0) {
+        DEBUG_printf("[phase1] skipped at/after right frontier count=" UINT_FMT " first=" UINT_FMT " last=" UINT_FMT " frontier=" UINT_FMT "\n",
+            (mp_uint_t)skipped_right_count,
+            (mp_uint_t)skipped_right_first,
+            (mp_uint_t)skipped_right_last,
+            (mp_uint_t)right_exclusive);
     }
-    size_t atmark_cleared = 0;
+    (void)skipped_right_first;
+    (void)skipped_right_last;
 
-    for (size_t block = 0; block < max_block; ) {
-        byte block_kind = ATB_GET_KIND(area, block);
+
+
+    // Invariants: validate mapping correctness and destination interval overlaps.
+    if (forward_table->count != object_count) {
+        DEBUG_printf("[phase1] ERROR count mismatch table=" UINT_FMT " objects=" UINT_FMT "\n",
+            (mp_uint_t)forward_table->count,
+            (mp_uint_t)object_count);
+        return;
+    }
+
+    for (size_t i = 0; i < forward_table->count; i++) {
+        size_t old_i = forward_table->entries[i].old_block;
+        size_t new_i = forward_table->entries[i].new_block;
+
+        if (old_i >= process_limit || new_i >= process_limit) {
+            DEBUG_printf("[phase1] ERROR mapping out of bounds idx=" UINT_FMT " old=" UINT_FMT " new=" UINT_FMT " limit=" UINT_FMT "\n",
+                (mp_uint_t)i,
+                (mp_uint_t)old_i,
+                (mp_uint_t)new_i,
+                (mp_uint_t)process_limit);
+            return;
+        }
+
+        byte old_kind = ATB_GET_KIND(area, old_i);
+        if (old_kind != AT_HEAD && old_kind != AT_MARK) {
+            DEBUG_printf("[phase1] ERROR old block not live idx=" UINT_FMT " old=" UINT_FMT " kind=%u\n",
+                (mp_uint_t)i,
+                (mp_uint_t)old_i,
+                (unsigned)old_kind);
+            return;
+        }
+
+        bool pinned_i = gc_is_block_pinned(old_i);
+        if (pinned_i && old_i != new_i) {
+            DEBUG_printf("[phase1] ERROR pinned mapping moved old=" UINT_FMT " new=" UINT_FMT "\n",
+                (mp_uint_t)old_i,
+                (mp_uint_t)new_i);
+            return;
+        }
+
+        size_t count_i = 1;
+        size_t scan_i = old_i + 1;
+        while (scan_i < process_limit && ATB_GET_KIND(area, scan_i) == AT_TAIL) {
+            count_i++;
+            scan_i++;
+        }
+
+        if (new_i + count_i > process_limit) {
+            DEBUG_printf("[phase1] ERROR destination range out of bounds old=" UINT_FMT " new=" UINT_FMT " count=" UINT_FMT " limit=" UINT_FMT "\n",
+                (mp_uint_t)old_i,
+                (mp_uint_t)new_i,
+                (mp_uint_t)count_i,
+                (mp_uint_t)process_limit);
+            return;
+        }
+
+        for (size_t j = i + 1; j < forward_table->count; j++) {
+            size_t old_j = forward_table->entries[j].old_block;
+            size_t new_j = forward_table->entries[j].new_block;
+
+            size_t count_j = 1;
+            size_t scan_j = old_j + 1;
+            while (scan_j < process_limit && ATB_GET_KIND(area, scan_j) == AT_TAIL) {
+                count_j++;
+                scan_j++;
+            }
+
+            size_t i_start = new_i;
+            size_t i_end = new_i + count_i;
+            size_t j_start = new_j;
+            size_t j_end = new_j + count_j;
+            bool overlap = (i_start < j_end) && (j_start < i_end);
+
+            if (overlap) {
+                DEBUG_printf("[phase1] ERROR overlap i(old=" UINT_FMT ",new=" UINT_FMT ",count=" UINT_FMT ") j(old=" UINT_FMT ",new=" UINT_FMT ",count=" UINT_FMT ")\n",
+                    (mp_uint_t)old_i,
+                    (mp_uint_t)new_i,
+                    (mp_uint_t)count_i,
+                    (mp_uint_t)old_j,
+                    (mp_uint_t)new_j,
+                    (mp_uint_t)count_j);
+                return;
+            }
+        }
+    }
+
+}
+
+// ============================================================================
+// PHASE 2: Copy Objects to New Locations (Perform Memmove)
+// ============================================================================
+// SPECIAL CASES:
+//   - Pinned and in-place objects keep their addresses and only need MARK->HEAD
+//   - Objects at/after the right frontier were skipped by Phase 1 and must also
+//     have their AT_MARK heads normalised in-place
+//   - Multi-block objects are moved as a single byte range and re-written
+static size_t gc_count_object_blocks(mp_state_mem_area_t *area, size_t head_block, size_t process_limit) {
+    size_t block_count = 1;
+    size_t block = head_block + 1;
+    while (block < process_limit && ATB_GET_KIND(area, block) == AT_TAIL) {
+        block_count++;
+        block++;
+    }
+    return block_count;
+}
+
+static void gc_write_object_atb(mp_state_mem_area_t *area, size_t head_block, size_t block_count) {
+    ATB_ANY_TO_FREE(area, head_block);
+    ATB_FREE_TO_HEAD(area, head_block);
+    for (size_t i = 1; i < block_count; ++i) {
+        ATB_ANY_TO_FREE(area, head_block + i);
+        ATB_FREE_TO_TAIL(area, head_block + i);
+    }
+}
+
+static void gc_clear_object_atb(mp_state_mem_area_t *area, size_t head_block, size_t block_count) {
+    for (size_t i = 0; i < block_count; ++i) {
+        ATB_ANY_TO_FREE(area, head_block + i);
+    }
+}
+
+__attribute__((unused))
+static void gc_compact_copy(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
+    if (area == NULL || forward_table == NULL) {
+        DEBUG_printf("[phase2] ERROR null input area=%p table=%p\n", area, forward_table);
+        return;
+    }
+
+    size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
+    size_t process_limit = MIN(area->gc_num_blocks, max_block);
+    size_t right_exclusive = area->gc_last_used_block_from_right + 1;
+    if (right_exclusive > process_limit) {
+        right_exclusive = process_limit;
+    }
+
+    size_t moved_count = 0;
+    size_t inplace_count = 0;
+    size_t normalized_right_count = 0;
+    size_t bytes_moved = 0;
+
+    for (size_t i = 0; i < forward_table->count; ++i) {
+        size_t old_block = forward_table->entries[i].old_block;
+        size_t new_block = forward_table->entries[i].new_block;
+
+        if (old_block >= process_limit || new_block >= process_limit) {
+            DEBUG_printf("[phase2] ERROR mapping out of bounds idx=" UINT_FMT " old=" UINT_FMT " new=" UINT_FMT " limit=" UINT_FMT "\n",
+                (mp_uint_t)i,
+                (mp_uint_t)old_block,
+                (mp_uint_t)new_block,
+                (mp_uint_t)process_limit);
+            return;
+        }
+
+        byte old_kind = ATB_GET_KIND(area, old_block);
+        if (old_kind != AT_HEAD && old_kind != AT_MARK) {
+            DEBUG_printf("[phase2] ERROR source block not live idx=" UINT_FMT " old=" UINT_FMT " kind=%u\n",
+                (mp_uint_t)i,
+                (mp_uint_t)old_block,
+                (unsigned)old_kind);
+            return;
+        }
+
+        size_t block_count = gc_count_object_blocks(area, old_block, process_limit);
+        size_t byte_count = block_count * BYTES_PER_BLOCK;
+
+        if (new_block > old_block) {
+            DEBUG_printf("[phase2] ERROR non-sliding mapping idx=" UINT_FMT " old=" UINT_FMT " new=" UINT_FMT " blocks=" UINT_FMT "\n",
+                (mp_uint_t)i,
+                (mp_uint_t)old_block,
+                (mp_uint_t)new_block,
+                (mp_uint_t)block_count);
+            return;
+        }
+
+        if (new_block == old_block) {
+            if (old_kind == AT_MARK) {
+                ATB_MARK_TO_HEAD(area, old_block);
+            }
+            inplace_count++;
+            continue;
+        }
+
+        void *old_ptr = (void *)PTR_FROM_BLOCK(area, old_block);
+        void *new_ptr = (void *)PTR_FROM_BLOCK(area, new_block);
         
-        if (block_kind != AT_MARK) {
-            block++;
+        // Diagnostic: capture type pointer before and after copy
+        mp_obj_base_t *src_obj = (mp_obj_base_t *)old_ptr;
+        mp_obj_base_t *dst_obj = (mp_obj_base_t *)new_ptr;
+        const void *src_type = src_obj->type;
+        const void *dst_type_after;
+        const void *dst_type_before __attribute__((unused)) = dst_obj->type;
+        memmove(new_ptr, old_ptr, byte_count);
+        
+        dst_type_after = dst_obj->type;
+        if (dst_type_after != src_type) {
+            DEBUG_printf("[phase2] TYPE_MISMATCH: old_blk=" UINT_FMT " new_blk=" UINT_FMT " src_type=%p dst_before=%p dst_after=%p byte_count=" UINT_FMT " old_ptr=%p new_ptr=%p\n",
+                (mp_uint_t)old_block, (mp_uint_t)new_block, src_type, dst_type_before, dst_type_after, (mp_uint_t)byte_count, old_ptr, new_ptr);
+        }
+        // Check for overlapping regions
+        uintptr_t old_start = (uintptr_t)old_ptr;
+        uintptr_t old_end = old_start + byte_count;
+        uintptr_t new_start = (uintptr_t)new_ptr;
+        uintptr_t new_end = new_start + byte_count;
+        
+        if ((new_start < old_end && new_start >= old_start) || 
+            (new_end > old_start && new_end <= old_end)) {
+            DEBUG_printf("[phase2] WARN OVERLAP: old=%p-%p new=%p-%p byte_count=" UINT_FMT "\n", 
+                (void*)old_start, (void*)old_end, (void*)new_start, (void*)new_end, (mp_uint_t)byte_count);
+        }
+        gc_write_object_atb(area, new_block, block_count);
+        gc_clear_object_atb(area, old_block, block_count);
+        moved_count++;
+        bytes_moved += byte_count;
+    }
+
+    for (size_t block = right_exclusive; block < process_limit; ++block) {
+        if (ATB_GET_KIND(area, block) == AT_MARK) {
+            ATB_MARK_TO_HEAD(area, block);
+            normalized_right_count++;
+        }
+    }
+
+
+}
+
+// ============================================================================
+// PHASE 3: Update Internal Object References
+// ============================================================================
+__attribute__((unused))
+static void gc_update_references(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
+    if (area == NULL || forward_table == NULL) {
+        DEBUG_printf("[phase3] ERROR null input area=%p table=%p\n", area, forward_table);
+        return;
+    }
+
+    size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
+    size_t process_limit = MIN(area->gc_num_blocks, max_block);
+
+    size_t objects_seen = 0;
+    size_t objects_typed = 0;
+    size_t fun_objects = 0;
+    size_t module_objects = 0;
+    size_t list_objects = 0;
+    size_t dict_objects = 0;
+    size_t str_objects = 0;
+    size_t slots_scanned = 0;
+    size_t slots_rewritten = 0;
+    size_t slots_nonheap = 0;
+    size_t skipped_null_type = 0;
+    size_t skipped_heap_type = 0;
+    size_t skipped_implausible_type = 0;
+
+    for (size_t block = 0; block < process_limit; ++block) {
+        byte kind = ATB_GET_KIND(area, block);
+        if (kind != AT_HEAD && kind != AT_MARK) {
             continue;
         }
 
-        bool is_pinned = gc_is_block_pinned(block);
-        if (is_pinned) {
-            block++;
+        size_t block_count = gc_count_object_blocks(area, block, process_limit);
+        mp_obj_base_t *base = (mp_obj_base_t *)PTR_FROM_BLOCK(area, block);
+        objects_seen++;
+
+        if (base->type == NULL) {
+            if (block < process_limit && ATB_GET_KIND(area, block + 1) == AT_TAIL) {
+                DEBUG_printf("[phase3] SKIP null_type obj=%p block=" UINT_FMT "\n", base, (mp_uint_t)block);
+            }
+            skipped_null_type++;
+            block += block_count - 1;
             continue;
         }
 
-        // Count consecutive tail blocks
-        size_t tail_count = 0;
-        size_t check = block + 1;
-        while (check < max_block && ATB_GET_KIND(area, check) == AT_TAIL) {
-            tail_count++;
-            check++;
+        bool type_in_heap = false;
+        #if MICROPY_GC_SPLIT_HEAP
+        type_in_heap = (gc_get_ptr_area((void *)base->type) != NULL);
+        #else
+        type_in_heap = ((byte *)base->type >= (byte *)area->gc_pool_start
+            && (byte *)base->type < (byte *)area->gc_pool_end);
+        #endif
+        if (type_in_heap) {
+            // Heap-resident type pointers indicate stale/non-object payloads.
+            if (block < process_limit && ATB_GET_KIND(area, block + 1) == AT_TAIL) {
+                DEBUG_printf("[phase3] SKIP heap_type obj=%p block=" UINT_FMT "\n", base, (mp_uint_t)block);
+            }
+            skipped_heap_type++;
+            block += block_count - 1;
+            continue;
         }
 
-        ATB_ANY_TO_FREE(area, block);
-        for (size_t i = 0; i < tail_count; i++) {
-            if (block + 1 + i < max_block) {
-                ATB_ANY_TO_FREE(area, block + 1 + i);
+        if (!gc_is_plausible_type_ptr(area, (uintptr_t)base->type)) {
+            if (block < process_limit && ATB_GET_KIND(area, block + 1) == AT_TAIL) {
+                DEBUG_printf("[phase3] SKIP implausible_type obj=%p type=%p block=" UINT_FMT "\n", base, base->type, (mp_uint_t)block);
+            }
+            skipped_implausible_type++;
+            block += block_count - 1;
+            continue;
+        }
+
+        if (base->type == &mp_type_fun_bc) {
+            mp_obj_fun_bc_t *fun = (mp_obj_fun_bc_t *)base;
+            objects_typed++;
+            fun_objects++;
+
+            DEBUG_printf("[phase3] fun_bc processing fun=%p bytecode_old=%p ", (void *)fun, (void *)fun->bytecode);
+
+            gc_rewrite_ptr_slot((void **)&fun->context, forward_table, &slots_scanned, &slots_rewritten, &slots_nonheap);
+            gc_rewrite_ptr_slot((void **)&fun->child_table, forward_table, &slots_scanned, &slots_rewritten, &slots_nonheap);
+            gc_rewrite_ptr_slot((void **)&fun->bytecode, forward_table, &slots_scanned, &slots_rewritten, &slots_nonheap);
+
+            if (fun->child_table != NULL) {
+                gc_update_raw_code_ptr_array(area, forward_table, (mp_raw_code_t **)fun->child_table);
+            }
+            
+            DEBUG_printf("bytecode_new=%p\n", (void *)fun->bytecode);
+            
+            #if MICROPY_PY_SYS_SETTRACE
+            gc_rewrite_ptr_slot((void **)&fun->rc, forward_table, &slots_scanned, &slots_rewritten, &slots_nonheap);
+            #endif
+
+            if (fun->context != NULL) {
+                _gc_update_module_context_obj_table((mp_module_context_t *)fun->context, forward_table,
+                    &slots_scanned, &slots_rewritten, &slots_nonheap);
+            }
+
+            // Rewrite default-arg payload as mp_obj_t values, preserving immediates.
+            size_t word_count = (block_count * BYTES_PER_BLOCK) / MP_BYTES_PER_OBJ_WORD;
+            size_t extra_word = offsetof(mp_obj_fun_bc_t, extra_args) / MP_BYTES_PER_OBJ_WORD;
+            mp_obj_t *words = (mp_obj_t *)fun;
+            for (size_t w = extra_word; w < word_count; ++w) {
+                mp_obj_t obj = words[w];
+                if (mp_obj_is_obj(obj)) {
+                    mp_obj_t new_obj = MP_OBJ_FROM_PTR(gc_update_ptr(MP_OBJ_TO_PTR(obj), forward_table));
+                    if (new_obj != obj) {
+                        words[w] = new_obj;
+                        slots_rewritten++;
+                    }
+                    slots_scanned++;
+                } else {
+                    slots_nonheap++;
+                }
+            }
+        } else if (base->type == &mp_type_module) {
+            mp_module_context_t *ctx = (mp_module_context_t *)base;
+            objects_typed++;
+            module_objects++;
+
+            gc_rewrite_ptr_slot((void **)&ctx->module.globals, forward_table, &slots_scanned, &slots_rewritten, &slots_nonheap);
+            _gc_update_module_context_obj_table(ctx, forward_table,
+                &slots_scanned, &slots_rewritten, &slots_nonheap);
+        } else if (base->type == &mp_type_list) {
+            mp_obj_list_t *list = (mp_obj_list_t *)base;
+            objects_typed++;
+            list_objects++;
+
+            _gc_update_list_items(list, forward_table);
+        } else if (base->type == &mp_type_dict) {
+            mp_obj_dict_t *dict = (mp_obj_dict_t *)base;
+            objects_typed++;
+            dict_objects++;
+
+            _gc_update_dict_values(dict, area, forward_table);
+        } else if (base->type == &mp_type_str || base->type == &mp_type_bytes) {
+            mp_obj_str_t *str = (mp_obj_str_t *)base;
+            objects_typed++;
+            str_objects++;
+
+            gc_rewrite_ptr_slot((void **)&str->data, forward_table,
+                &slots_scanned, &slots_rewritten, &slots_nonheap);
+        #if MICROPY_PY_BUILTINS_BYTEARRAY
+        } else if (base->type == &mp_type_bytearray) {
+            mp_obj_array_t *arr = (mp_obj_array_t *)base;
+            objects_typed++;
+
+            gc_rewrite_ptr_slot((void **)&arr->items, forward_table,
+                &slots_scanned, &slots_rewritten, &slots_nonheap);
+        #endif
+        } else if (base->type == &mp_type_closure) {
+            gc_obj_closure_t *closure = (gc_obj_closure_t *)base;
+            objects_typed++;
+
+            if (mp_obj_is_obj(closure->fun)) {
+                mp_obj_t new_fun = MP_OBJ_FROM_PTR(gc_update_ptr(MP_OBJ_TO_PTR(closure->fun), forward_table));
+                if (new_fun != closure->fun) {
+                    closure->fun = new_fun;
+                    slots_rewritten++;
+                }
+                slots_scanned++;
+            } else {
+                slots_nonheap++;
+            }
+
+            size_t obj_bytes = block_count * BYTES_PER_BLOCK;
+            size_t closed_capacity = 0;
+            if (obj_bytes > offsetof(gc_obj_closure_t, closed)) {
+                closed_capacity = (obj_bytes - offsetof(gc_obj_closure_t, closed)) / sizeof(mp_obj_t);
+            }
+            size_t closed_count = MIN(closure->n_closed, closed_capacity);
+            for (size_t i = 0; i < closed_count; ++i) {
+                mp_obj_t obj = closure->closed[i];
+                if (mp_obj_is_obj(obj)) {
+                    mp_obj_t new_obj = MP_OBJ_FROM_PTR(gc_update_ptr(MP_OBJ_TO_PTR(obj), forward_table));
+                    if (new_obj != obj) {
+                        closure->closed[i] = new_obj;
+                        slots_rewritten++;
+                    }
+                    slots_scanned++;
+                } else {
+                    slots_nonheap++;
+                }
+            }
+        } else if (base->type == &mp_type_cell) {
+            mp_obj_cell_t *cell = (mp_obj_cell_t *)base;
+            objects_typed++;
+
+            if (mp_obj_is_obj(cell->obj)) {
+                mp_obj_t new_obj = MP_OBJ_FROM_PTR(gc_update_ptr(MP_OBJ_TO_PTR(cell->obj), forward_table));
+                if (new_obj != cell->obj) {
+                    cell->obj = new_obj;
+                    slots_rewritten++;
+                }
+                slots_scanned++;
+            } else {
+                slots_nonheap++;
             }
         }
 
-        atmark_cleared++;
-        block += tail_count + 1;
+        block += block_count - 1;
     }
-    {
-        size_t max_block_val = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
-        size_t head_count = 0, tail_count = 0, free_count = 0, mark_count = 0;
-        for (size_t block = 0; block < max_block_val; block++) {
-            byte kind = ATB_GET_KIND(area, block);
-            if (kind == AT_HEAD) head_count++;
-            else if (kind == AT_TAIL) tail_count++;
-            else if (kind == AT_FREE) free_count++;
-            else if (kind == AT_MARK) mark_count++;
+
+
+}
+
+// ============================================================================
+// Update Root Pointers (From VM Context)
+// ============================================================================
+// CRITICAL: Some roots point to objects that have been moved, so we
+// must use forward_table to find their new locations
+__attribute__((unused))
+static void gc_update_roots(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
+    if (area == NULL || forward_table == NULL) {
+        DEBUG_printf("[roots] ERROR null input area=%p table=%p\n", area, forward_table);
+        return;
+    }
+
+    size_t slots_scanned = 0;
+    size_t slots_rewritten = 0;
+    size_t slots_nonheap = 0;
+    size_t root_section_rewritten = 0;
+    size_t code_state_nodes = 0;
+
+    // Keep root updates aligned with gc_collect_start root scan range.
+    void **ptrs = (void **)(void *)&mp_state_ctx;
+    size_t root_start = offsetof(mp_state_ctx_t, thread.dict_locals);
+    size_t root_end = offsetof(mp_state_ctx_t, vm.qstr_last_chunk);
+    size_t root_slots = (root_end - root_start) / sizeof(void *);
+    root_section_rewritten = gc_rewrite_ptr_array(ptrs + root_start / sizeof(void *), root_slots, forward_table,
+        &slots_scanned, &slots_rewritten, &slots_nonheap);
+
+    gc_rewrite_ptr_slot((void **)&MP_STATE_THREAD(dict_locals), forward_table,
+        &slots_scanned, &slots_rewritten, &slots_nonheap);
+    gc_rewrite_ptr_slot((void **)&MP_STATE_THREAD(dict_globals), forward_table,
+        &slots_scanned, &slots_rewritten, &slots_nonheap);
+
+    for (mp_code_state_t *cs = MP_STATE_THREAD(current_code_state); cs != NULL && code_state_nodes < 4096; ) {
+        code_state_nodes++;
+
+        mp_obj_fun_bc_t *old_fun_bc = cs->fun_bc;
+        const uint8_t *old_bytecode = old_fun_bc != NULL ? old_fun_bc->bytecode : NULL;
+        const uint8_t *old_ip = cs->ip;
+        size_t ip_offset = 0;
+        bool ip_in_old_bytecode = false;
+        if (old_bytecode != NULL && old_ip != NULL && old_ip >= old_bytecode) {
+            ip_offset = (size_t)(old_ip - old_bytecode);
+            ip_in_old_bytecode = true;
+        }
+
+        gc_rewrite_ptr_slot((void **)&cs->fun_bc, forward_table,
+            &slots_scanned, &slots_rewritten, &slots_nonheap);
+
+        // ip points inside bytecode, so preserve its offset across bytecode relocation.
+        if (ip_in_old_bytecode && cs->fun_bc != NULL && cs->fun_bc->bytecode != NULL) {
+            const uint8_t *new_bytecode = cs->fun_bc->bytecode;
+            cs->ip = (const byte *)new_bytecode + ip_offset;
+            slots_scanned++;
+            if (new_bytecode != old_bytecode) {
+                slots_rewritten++;
+            }
+        } else {
+            gc_rewrite_ptr_slot((void **)&cs->ip, forward_table,
+                &slots_scanned, &slots_rewritten, &slots_nonheap);
+        }
+        
+        gc_rewrite_ptr_slot((void **)&cs->sp, forward_table,
+            &slots_scanned, &slots_rewritten, &slots_nonheap);
+        gc_rewrite_ptr_slot((void **)&cs->old_globals, forward_table,
+            &slots_scanned, &slots_rewritten, &slots_nonheap);
+        #if MICROPY_PY_SYS_SETTRACE
+        gc_rewrite_ptr_slot((void **)&cs->frame, forward_table,
+            &slots_scanned, &slots_rewritten, &slots_nonheap);
+        #endif
+
+        // Rewrite exception handler pointers, which also point into bytecode.
+        if (cs->fun_bc != NULL && cs->fun_bc->bytecode != NULL) {
+            const byte *new_bytecode = cs->fun_bc->bytecode;
+            const byte *prelude_ptr = new_bytecode;
+            size_t n_state_unused, n_exc_stack, scope_flags, n_pos_args, n_kwonly_args, n_def_pos_args;
+            MP_BC_PRELUDE_SIG_DECODE_INTO(prelude_ptr, n_state_unused, n_exc_stack, scope_flags, n_pos_args, n_kwonly_args, n_def_pos_args);
+            (void)n_state_unused;
+            (void)scope_flags;
+            (void)n_pos_args;
+            (void)n_kwonly_args;
+            (void)n_def_pos_args;
+
+            mp_exc_stack_t *exc_state = (mp_exc_stack_t *)(void *)(cs->state + cs->n_state);
+            size_t active_exc = cs->exc_sp_idx;
+            if (active_exc > n_exc_stack) {
+                active_exc = n_exc_stack;
+            }
+            for (size_t i = 0; i < active_exc; ++i) {
+                const byte *handler = exc_state[i].handler;
+                if (handler == NULL) {
+                    continue;
+                }
+
+                if (old_bytecode != NULL && handler >= old_bytecode) {
+                    size_t handler_offset = (size_t)(handler - old_bytecode);
+                    const byte *new_handler = new_bytecode + handler_offset;
+                    if (new_handler != handler) {
+                        exc_state[i].handler = new_handler;
+                        slots_rewritten++;
+                    }
+                    slots_scanned++;
+                } else {
+                    gc_rewrite_ptr_slot((void **)&exc_state[i].handler, forward_table,
+                        &slots_scanned, &slots_rewritten, &slots_nonheap);
+                }
+            }
+        }
+
+        for (size_t i = 0; i < cs->n_state; ++i) {
+            mp_obj_t state_obj = cs->state[i];
+            if (mp_obj_is_obj(state_obj)) {
+                mp_obj_t new_obj = MP_OBJ_FROM_PTR(gc_update_ptr(MP_OBJ_TO_PTR(state_obj), forward_table));
+                if (new_obj != state_obj) {
+                    cs->state[i] = new_obj;
+                    slots_rewritten++;
+                }
+                slots_scanned++;
+            } else {
+                slots_nonheap++;
+            }
+        }
+
+        #if MICROPY_STACKLESS
+        gc_rewrite_ptr_slot((void **)&cs->prev, forward_table,
+            &slots_scanned, &slots_rewritten, &slots_nonheap);
+        cs = cs->prev;
+        #else
+        gc_rewrite_ptr_slot((void **)&cs->prev_state, forward_table,
+            &slots_scanned, &slots_rewritten, &slots_nonheap);
+        cs = cs->prev_state;
+        #endif
+    }
+
+    mp_obj_dict_t *dict_locals = MP_STATE_THREAD(dict_locals);
+    mp_obj_dict_t *dict_globals = MP_STATE_THREAD(dict_globals);
+    _gc_update_dict_values(dict_locals, area, forward_table);
+    if (dict_globals != dict_locals) {
+        _gc_update_dict_values(dict_globals, area, forward_table);
+    }
+
+    gc_rewrite_ptr_slot((void **)&MP_STATE_VM(last_pool), forward_table,
+        &slots_scanned, &slots_rewritten, &slots_nonheap);
+    gc_rewrite_ptr_slot((void **)&MP_STATE_VM(qstr_last_chunk), forward_table,
+        &slots_scanned, &slots_rewritten, &slots_nonheap);
+
+    size_t qstr_pools_seen = 0;
+    for (qstr_pool_t *pool = MP_STATE_VM(last_pool); pool != NULL && qstr_pools_seen < 4096; ) {
+        qstr_pools_seen++;
+
+        gc_rewrite_ptr_slot((void **)&pool->prev, forward_table,
+            &slots_scanned, &slots_rewritten, &slots_nonheap);
+        #if MICROPY_QSTR_BYTES_IN_HASH
+        gc_rewrite_ptr_slot((void **)&pool->hashes, forward_table,
+            &slots_scanned, &slots_rewritten, &slots_nonheap);
+        #endif
+        gc_rewrite_ptr_slot((void **)&pool->lengths, forward_table,
+            &slots_scanned, &slots_rewritten, &slots_nonheap);
+        gc_rewrite_ptr_array((void **)pool->qstrs, pool->len, forward_table,
+            &slots_scanned, &slots_rewritten, &slots_nonheap);
+
+        pool = (qstr_pool_t *)pool->prev;
+    }
+
+    DEBUG_printf("[roots] summary root_slots=" UINT_FMT " root_rewritten=" UINT_FMT " scanned=" UINT_FMT " rewritten=" UINT_FMT " nonheap=" UINT_FMT " qstr_pools=" UINT_FMT " code_states=" UINT_FMT "\n",
+        (mp_uint_t)root_slots,
+        (mp_uint_t)root_section_rewritten,
+        (mp_uint_t)slots_scanned,
+        (mp_uint_t)slots_rewritten,
+        (mp_uint_t)slots_nonheap,
+        (mp_uint_t)qstr_pools_seen,
+        (mp_uint_t)code_state_nodes);
+    (void)root_section_rewritten;
+    (void)code_state_nodes;
+}
+
+// ============================================================================
+// Update Dispatch and Code Tables
+// ============================================================================
+
+static bool gc_ptr_is_in_heap(void *ptr) {
+    uintptr_t p = (uintptr_t)ptr;
+    if (p == 0) {
+        return false;
+    }
+
+    void *clean_ptr = (void *)(p & ~(uintptr_t)3);
+    #if MICROPY_GC_SPLIT_HEAP
+    for (mp_state_mem_area_t *scan = &MP_STATE_MEM(area); scan != NULL; scan = NEXT_AREA(scan)) {
+        if ((byte *)clean_ptr >= (byte *)scan->gc_pool_start && (byte *)clean_ptr < (byte *)scan->gc_pool_end) {
+            return true;
+        }
+    }
+    return false;
+    #else
+    return (byte *)clean_ptr >= (byte *)MP_STATE_MEM(area).gc_pool_start
+        && (byte *)clean_ptr < (byte *)MP_STATE_MEM(area).gc_pool_end;
+    #endif
+}
+
+static bool gc_rewrite_ptr_slot(void **slot, gc_forward_table_t *forward_table, size_t *slots_scanned, size_t *slots_rewritten, size_t *slots_nonheap) {
+    if (slot == NULL) {
+        return false;
+    }
+
+    if (slots_scanned != NULL) {
+        (*slots_scanned)++;
+    }
+
+    void *old_ptr = *slot;
+    if (!gc_ptr_is_in_heap(old_ptr)) {
+        if (slots_nonheap != NULL) {
+            (*slots_nonheap)++;
+        }
+        return false;
+    }
+
+    void *new_ptr = gc_update_ptr(old_ptr, forward_table);
+    if (new_ptr != old_ptr) {
+        *slot = new_ptr;
+        if (slots_rewritten != NULL) {
+            (*slots_rewritten)++;
+        }
+        return true;
+    }
+    return false;
+}
+
+static size_t gc_rewrite_ptr_array(void **slots, size_t count, gc_forward_table_t *forward_table, size_t *slots_scanned, size_t *slots_rewritten, size_t *slots_nonheap) {
+    if (slots == NULL || count == 0) {
+        return 0;
+    }
+
+    size_t rewritten = 0;
+    for (size_t i = 0; i < count; ++i) {
+        rewritten += gc_rewrite_ptr_slot(&slots[i], forward_table, slots_scanned, slots_rewritten, slots_nonheap) ? 1 : 0;
+    }
+    return rewritten;
+}
+
+__attribute__((unused))
+static void _gc_update_dict_values(mp_obj_dict_t *dict, mp_state_mem_area_t *area, 
+                                   gc_forward_table_t *forward_table) {
+    if (dict == NULL) {
+        return;
+    }
+
+    mp_map_t *map = &dict->map;
+    map->table = (mp_map_elem_t *)gc_update_ptr(map->table, forward_table);
+    
+    if (map->table == NULL || map->alloc == 0) {
+        return;
+    }
+    for (size_t i = 0; i < map->alloc; i++) {
+        mp_map_elem_t *elem = &map->table[i];
+        
+        if (elem->key != MP_OBJ_NULL && elem->key != MP_OBJ_SENTINEL && mp_obj_is_obj(elem->key)) {
+            elem->key = MP_OBJ_FROM_PTR(gc_update_ptr(MP_OBJ_TO_PTR(elem->key), forward_table));
+        }
+        if (elem->value != MP_OBJ_NULL && elem->value != MP_OBJ_SENTINEL && mp_obj_is_obj(elem->value)) {
+            elem->value = MP_OBJ_FROM_PTR(gc_update_ptr(MP_OBJ_TO_PTR(elem->value), forward_table));
         }
     }
 }
 
 __attribute__((unused))
-static void gc_update_references(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
-    // Update all internal object references
-    size_t max_block = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
-    size_t objects_processed = 0;
-    size_t refs_updated = 0;
-    size_t pinned_found = 0;
-
-        DEBUG_printf("PHASE3_START: max_block=" UINT_FMT ", pinned_table.count=" UINT_FMT "\n",
-               max_block, gc_pinned_table.count);
-
-    for (size_t block = 0; block < max_block; block++) {
-        byte block_kind = ATB_GET_KIND(area, block);
-
-        // Process live objects: newly compacted ones (AT_HEAD) AND pinned objects that stayed in place
-        // Pinned objects may have moved to their location in the compacted region OR stayed at original location
-        // Either way, we need to update their internal references
-        bool is_pinned = gc_is_block_pinned(block);
-        if (is_pinned) {
-            pinned_found++;
-        }
-        
-        if (block_kind == AT_HEAD || is_pinned) {
-            objects_processed++;
-            
-            // Count blocks in this object chain (looking for consecutive TAIL blocks)
-            size_t block_count = 1;
-            size_t next_block = block + 1;
-            while (next_block < max_block && ATB_GET_KIND(area, next_block) == AT_TAIL) {
-                block_count++;
-                next_block++;
-            }
-
-            // Get object's memory and scan each word
-            void **obj_start = (void **)PTR_FROM_BLOCK(area, block);
-            size_t words_count = (block_count * BYTES_PER_BLOCK) / sizeof(void*);
-
-            // Only scan allocations that look like real MP objects:
-            // word[0] should be a type pointer that is non-NULL, above the
-            // small-immediate range, and outside the GC heap.
-            // This avoids corrupting raw data/bytecode buffers by interpreting
-            // arbitrary bytes as heap references.
-            mp_obj_base_t *obj_base = (mp_obj_base_t *)obj_start;
-            uintptr_t type_ptr = (uintptr_t)obj_base->type;
-            bool type_in_heap = false;
-            #if MICROPY_GC_SPLIT_HEAP
-            type_in_heap = (gc_get_ptr_area((void *)type_ptr) != NULL);
-            #else
-            type_in_heap = ((byte *)type_ptr >= (byte *)area->gc_pool_start && (byte *)type_ptr < (byte *)area->gc_pool_end);
-            #endif
-            bool looks_like_obj = (type_ptr != 0) && (type_ptr >= 0x100000) && !type_in_heap;
-            if (!looks_like_obj) {
-                continue;
-            }
-
-            // CRITICAL: Check if this is a pointer object and skip its addr field
-            // mp_obj_pointer_t layout: word 0 = type ptr, word 1 = addr (raw, not a GC ref)
-            bool is_pointer_obj = false;
-            if (obj_base && obj_base->type) {
-                // Check if this object's type is mp_type_pointer
-                // mp_type_pointer.base.name should be "pointer"
-                is_pointer_obj = (obj_base->type == &mp_type_pointer);
-                if (is_pointer_obj) {
-                }
-            }
-            
-            for (size_t i = 0; i < words_count; i++) {
-                // SKIP pointer object's addr field (word index 1) - ORIGINAL DETECTION
-                if (is_pointer_obj && i == 1) {
-                    continue;
-                }
-                
-                void *ref_ptr = obj_start[i];
-                
-                // Skip obvious non-pointers (small integers, tagged values)
-                if ((uintptr_t)ref_ptr < 0x100000) {
-                    continue;
-                }
-                
-                // SAFETY: Check if this looks like a valid heap reference BEFORE attempting lookup
-                // Skip addresses that are outside heap pool bounds entirely
-                mp_state_mem_area_t *ref_area = NULL;
-                #if MICROPY_GC_SPLIT_HEAP
-                ref_area = gc_get_ptr_area(ref_ptr);
-                #else  
-                if ((byte *)ref_ptr >= (byte *)area->gc_pool_start && (byte *)ref_ptr < (byte *)area->gc_pool_end) {
-                    ref_area = area;
-                }
-                #endif
-                
-                if (ref_area) {
-                    size_t old_block = BLOCK_FROM_PTR(ref_area, ref_ptr);
-                    size_t new_block = gc_forward_table_lookup(forward_table, old_block);
-                    if (new_block != (size_t)-1 && new_block != old_block) {
-                        // FIX: Calculate offset within block - pointers often point inside blocks (e.g., bytecode)
-                        uintptr_t offset = (uintptr_t)ref_ptr - (uintptr_t)PTR_FROM_BLOCK(ref_area, old_block);
-                        void *new_ptr = (void *)((uintptr_t)PTR_FROM_BLOCK(ref_area, new_block) + offset);
-                        
-                        // Write the new pointer
-                        obj_start[i] = new_ptr;
-                        
-                        refs_updated++;
-                    }
-                }
-            }
-
-            if (obj_base->type == &mp_type_module) {
-                _gc_update_module_context_obj_table((mp_module_context_t *)obj_base, forward_table);
-            }
-
-            block = next_block - 1;
-        }
-    }
-
-    {
-        size_t max_block_val = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
-        size_t head_count = 0, tail_count = 0, free_count = 0, mark_count = 0;
-        for (size_t block = 0; block < max_block_val; block++) {
-            byte kind = ATB_GET_KIND(area, block);
-            if (kind == AT_HEAD) head_count++;
-            else if (kind == AT_TAIL) tail_count++;
-            else if (kind == AT_FREE) free_count++;
-            else if (kind == AT_MARK) mark_count++;
-        }
-        DEBUG_printf("gc_update_references: ATB state - HEAD=" UINT_FMT ", TAIL=" UINT_FMT ", FREE=" UINT_FMT ", MARK=" UINT_FMT "\n",
-                     head_count, tail_count, free_count, mark_count);
-    }
-}
-
-static void _gc_update_module_context_obj_table(mp_module_context_t *ctx, gc_forward_table_t *forward_table) {
-    if (ctx->constants.obj_table == NULL || ctx->obj_table_len == 0) {
+static void _gc_update_list_items(mp_obj_list_t *list, gc_forward_table_t *forward_table) {
+    if (list == NULL || list->items == NULL || list->len == 0) {
         return;
     }
 
-    for (size_t i = 0; i < ctx->obj_table_len; ++i) {
-        ctx->constants.obj_table[i] = (mp_obj_t)gc_update_ptr((void *)ctx->constants.obj_table[i], forward_table);
+    list->items = (mp_obj_t *)gc_update_ptr(list->items, forward_table);
+    if (list->items == NULL) {
+        return;
+    }
+
+    for (size_t i = 0; i < list->len; ++i) {
+        if (mp_obj_is_obj(list->items[i])) {
+            list->items[i] = MP_OBJ_FROM_PTR(gc_update_ptr(MP_OBJ_TO_PTR(list->items[i]), forward_table));
+        }
     }
 }
 
@@ -2548,141 +3821,86 @@ static void *gc_update_ptr(void *ptr, gc_forward_table_t *forward_table) {
         return NULL;
     }
 
-    void *clean_ptr = (void *)(p & ~3);
-    mp_state_mem_area_t *area = NULL;
+    if (forward_table == NULL || forward_table->entries == NULL || forward_table->capacity == 0) {
+        return ptr;
+    }
+
+    // Preserve object tag bits (if present) and operate on the untagged address.
+    uintptr_t tag_bits = p & 3;
+    void *clean_ptr = (void *)(p & ~(uintptr_t)3);
+
+    mp_state_mem_area_t *ref_area = NULL;
     #if MICROPY_GC_SPLIT_HEAP
-    area = gc_get_ptr_area(clean_ptr);
+    for (mp_state_mem_area_t *area = &MP_STATE_MEM(area); area != NULL; area = NEXT_AREA(area)) {
+        if ((byte *)clean_ptr >= (byte *)area->gc_pool_start && (byte *)clean_ptr < (byte *)area->gc_pool_end) {
+            ref_area = area;
+            break;
+        }
+    }
     #else
-    if (VERIFY_PTR(clean_ptr)) {
-        area = &MP_STATE_MEM(area);
+    if ((byte *)clean_ptr >= (byte *)MP_STATE_MEM(area).gc_pool_start
+        && (byte *)clean_ptr < (byte *)MP_STATE_MEM(area).gc_pool_end) {
+        ref_area = &MP_STATE_MEM(area);
     }
     #endif
 
-    if (area != NULL) {
-        size_t old_block = BLOCK_FROM_PTR(area, clean_ptr);
-        size_t new_block = gc_forward_table_lookup(forward_table, old_block);
-        if (new_block != (size_t)-1) {
-            // Calculate offset within the block if the pointer wasn't exactly at block start
-            uintptr_t offset = (uintptr_t)clean_ptr - (uintptr_t)PTR_FROM_BLOCK(area, old_block);
-            void *new_ptr = (void *)((uintptr_t)PTR_FROM_BLOCK(area, new_block) + offset);
-           
-            DEBUG_printf("gc_update_ptr: pointer block " UINT_FMT " -> block " UINT_FMT "\n", old_block, new_block);
-            // Re-apply original tag bits
-            return (void *)((uintptr_t)new_ptr | (p & 3));
-        } else {
-            // Pointer in heap but not in forward table - probably from right frontier or swept away
-            byte block_kind __attribute__((unused)) = ATB_GET_KIND(area, old_block);
-            DEBUG_printf("gc_update_ptr: pointer %p (block " UINT_FMT ") NOT in forward table - ATB kind=%d\n", ptr, old_block, block_kind);
-        }
+    if (ref_area == NULL) {
+        return ptr;
     }
+
+    for (size_t i = 0; i < forward_table->count; ++i) {
+        gc_forward_entry_t *e = &forward_table->entries[i];
+        uintptr_t old_start = (uintptr_t)PTR_FROM_BLOCK(ref_area, e->old_block);
+        uintptr_t old_end = old_start + e->n_blocks * BYTES_PER_BLOCK;
+        uintptr_t p_clean = (uintptr_t)clean_ptr;
+        if (p_clean < old_start || p_clean >= old_end) {
+            continue;
+        }
+
+        if (e->new_block == e->old_block) {
+            return ptr;
+        }
+
+        uintptr_t offset = p_clean - old_start;
+        void *new_clean_ptr = (void *)((uintptr_t)PTR_FROM_BLOCK(ref_area, e->new_block) + offset);
+        return (void *)((uintptr_t)new_clean_ptr | tag_bits);
+    }
+
     return ptr;
 }
 
-
 __attribute__((unused))
-static void gc_update_roots(mp_state_mem_area_t *area, gc_forward_table_t *forward_table) {
-    DEBUG_printf("gc_update_roots: ENTER\n");
-    #if !MICROPY_GC_SPLIT_HEAP
-    area = &MP_STATE_MEM(area);
+static void _gc_update_module_context_obj_table(mp_module_context_t *ctx, gc_forward_table_t *forward_table, size_t *slots_scanned, size_t *slots_rewritten, size_t *slots_nonheap) {
+    if (ctx == NULL) {
+        return;
+    }
+
+    gc_rewrite_ptr_slot((void **)&ctx->module.globals, forward_table, slots_scanned, slots_rewritten, slots_nonheap);
+
+    #if MICROPY_EMIT_BYTECODE_USES_QSTR_TABLE
+    gc_rewrite_ptr_slot((void **)&ctx->constants.qstr_table, forward_table, slots_scanned, slots_rewritten, slots_nonheap);
     #endif
 
-    void **ptrs = (void **)(void *)&mp_state_ctx;
-    
-    // CRITICAL: Update dict_locals and dict_globals pointers FIRST!
-    // These come before thread.nlr_top in the struct but they're roots that need updating
-    // if the dict objects moved during compaction
-    size_t dict_locals_idx = offsetof(mp_state_ctx_t, thread.dict_locals) / sizeof(void *);
-    size_t dict_globals_idx = offsetof(mp_state_ctx_t, thread.dict_globals) / sizeof(void *);
-    
-    ptrs[dict_locals_idx] = gc_update_ptr(ptrs[dict_locals_idx], forward_table);
-    ptrs[dict_globals_idx] = gc_update_ptr(ptrs[dict_globals_idx], forward_table);
-    DEBUG_printf("gc_update_roots: dict pointers updated\n");
-    
-    // Now update the remaining root pointers (starting from nlr_top)
-    size_t root_start_idx = offsetof(mp_state_ctx_t, thread.nlr_top) / sizeof(void *);
-    size_t root_end_idx = offsetof(mp_state_ctx_t, vm.qstr_last_chunk) / sizeof(void *);
+    gc_rewrite_ptr_slot((void **)&ctx->constants.obj_table, forward_table, slots_scanned, slots_rewritten, slots_nonheap);
 
-    for (size_t i = root_start_idx; i < root_end_idx; i++) {
-        ptrs[i] = gc_update_ptr(ptrs[i], forward_table);
-    }
-
-    // If dicts moved, their internal table pointers also need updating (VERY IMPORTANT, DO NOT TOUCH)
-    // CRITICAL: Avoid updating the same dict twice if dict_locals and dict_globals are the same object
-    if (MP_STATE_THREAD(dict_locals)) _gc_update_dict_values(MP_STATE_THREAD(dict_locals), area, forward_table);
-    if (MP_STATE_THREAD(dict_globals) && MP_STATE_THREAD(dict_globals) != MP_STATE_THREAD(dict_locals)) {
-        _gc_update_dict_values(MP_STATE_THREAD(dict_globals), area, forward_table);
-    }
-
-    DEBUG_printf("gc_update_roots: all root pointers updated\n");
-    DEBUG_printf("gc_update_roots: EXIT\n");
-
-    {
-        size_t max_block_val = area->gc_alloc_table_byte_len * BLOCKS_PER_ATB;
-        size_t head_count = 0, tail_count = 0, free_count = 0, mark_count = 0;
-        for (size_t block = 0; block < max_block_val; block++) {
-            byte kind = ATB_GET_KIND(area, block);
-            if (kind == AT_HEAD) head_count++;
-            else if (kind == AT_TAIL) tail_count++;
-            else if (kind == AT_FREE) free_count++;
-            else if (kind == AT_MARK) mark_count++;
-        }
-        DEBUG_printf("gc_update_roots: ATB state - HEAD=" UINT_FMT ", TAIL=" UINT_FMT ", FREE=" UINT_FMT ", MARK=" UINT_FMT "\n",
-                     head_count, tail_count, free_count, mark_count);
-    }
-}
-
-static void _gc_update_dict_values(mp_obj_dict_t *dict, mp_state_mem_area_t *area, 
-                                   gc_forward_table_t *forward_table) {
-    DEBUG_printf("_gc_update_dict_values: ENTER dict=%p\n", dict);
-    if (dict == NULL) {
-        DEBUG_printf("_gc_update_dict_values: dict is NULL, EXIT\n");
+    if (ctx->constants.obj_table == NULL || ctx->obj_table_len == 0) {
         return;
     }
 
-    mp_map_t *map = &dict->map;
-    DEBUG_printf("_gc_update_dict_values: map table before update: %p, alloc=%d\n", map->table, map->alloc);
-    map->table = (mp_map_elem_t *)gc_update_ptr(map->table, forward_table);
-    DEBUG_printf("_gc_update_dict_values: map table after update: %p\n", map->table);
-    
-    if (map->table == NULL || map->alloc == 0) {
-        DEBUG_printf("_gc_update_dict_values: dict map table is NULL, EXIT\n");
-        return;
-    }
-    for (size_t i = 0; i < map->alloc; i++) {
-        mp_map_elem_t *elem = &map->table[i];
-        
-        if (elem->key != MP_OBJ_NULL && elem->key != MP_OBJ_SENTINEL) {
-            void *old_key = (void *)elem->key;
-            elem->key = (mp_obj_t)gc_update_ptr(elem->key, forward_table);
-            if ((void *)elem->key != old_key) {
-                DEBUG_printf("_gc_update_dict_values: key remapped %p -> %p\n", old_key, elem->key);
+    for (size_t i = 0; i < ctx->obj_table_len; ++i) {
+        mp_obj_t obj = ctx->constants.obj_table[i];
+        if (mp_obj_is_obj(obj)) {
+            ctx->constants.obj_table[i] = MP_OBJ_FROM_PTR(gc_update_ptr(MP_OBJ_TO_PTR(obj), forward_table));
+            if (slots_scanned != NULL) {
+                (*slots_scanned)++;
             }
-        }
-        if (elem->value != MP_OBJ_NULL && elem->value != MP_OBJ_SENTINEL) {
-            void *old_value = (void *)elem->value;
-            elem->value = (mp_obj_t)gc_update_ptr(elem->value, forward_table);
-            if ((void *)elem->value != old_value) {
-                DEBUG_printf("_gc_update_dict_values: value remapped %p -> %p\n", old_value, elem->value);
-            } else {
-                // Value not remapped - check if it's within valid heap range
-                void *clean_val = (void *)((uintptr_t)old_value & ~3);
-                int in_range = (clean_val >= (void *)area->gc_pool_start && clean_val < (void *)area->gc_pool_end) ? 1 : 0;
-                
-                if (in_range) {
-                    size_t val_block = BLOCK_FROM_PTR(area, clean_val);
-                    byte block_kind = ATB_GET_KIND(area, val_block);
-                    const char *kind_str __attribute__((unused)) = (block_kind == AT_HEAD) ? "AT_HEAD" : 
-                                           (block_kind == AT_TAIL) ? "AT_TAIL" :
-                                           (block_kind == AT_MARK) ? "AT_MARK" :
-                                           (block_kind == AT_FREE) ? "AT_FREE" : "UNKNOWN";
-                    DEBUG_printf("_gc_update_dict_values: value NOT remapped: %p at block " UINT_FMT " (ATB=%s)\n", old_value, val_block, kind_str);
-                } else {
-                    DEBUG_printf("_gc_update_dict_values: value NOT remapped: %p (not in heap)\n", old_value);
-                }
+            if (slots_rewritten != NULL && ctx->constants.obj_table[i] != obj) {
+                (*slots_rewritten)++;
             }
+        } else if (slots_nonheap != NULL) {
+            (*slots_nonheap)++;
         }
     }
-    DEBUG_printf("_gc_update_dict_values: EXIT\n");
 }
 
 #endif // MICROPY_ENABLE_GC

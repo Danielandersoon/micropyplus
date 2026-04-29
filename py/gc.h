@@ -137,6 +137,7 @@ bool gc_is_block_pinned(size_t block);
 typedef struct {
     size_t old_block;
     size_t new_block;
+    size_t n_blocks;
 } gc_forward_entry_t;
 
 typedef struct {

@@ -44,6 +44,72 @@
 #define DEBUG_printf(...) (void)0
 #endif
 
+#define MICROPY_DEBUG_FUN_GC_TRACE (0)
+
+#if MICROPY_DEBUG_FUN_GC_TRACE
+#define FUN_GC_TRACE(...) printf(__VA_ARGS__)
+static void fun_gc_trace_dump_child_table(struct _mp_raw_code_t *const *child_table) {
+    if (child_table == NULL) {
+        return;
+    }
+    size_t bytes = gc_nbytes((void *)child_table);
+    if (bytes == 0) {
+        printf("[fun-trace] child-table=%p bytes=0 (not in GC heap or invalid)\n", child_table);
+        return;
+    }
+    size_t entries = bytes / sizeof(child_table[0]);
+    size_t limit = entries < 4 ? entries : 4;
+    printf("[fun-trace] child-table=%p bytes=%u entries~=%u\n",
+        child_table, (unsigned)bytes, (unsigned)entries);
+    for (size_t i = 0; i < limit; ++i) {
+        const mp_raw_code_t *rc = child_table[i];
+        if (rc == NULL) {
+            printf("[fun-trace] child[%u]=NULL\n", (unsigned)i);
+            continue;
+        }
+        printf("[fun-trace] child[%u]=%p kind=%u gen=%u fun_data=%p children=%p\n",
+            (unsigned)i, rc, (unsigned)rc->kind, (unsigned)rc->is_generator, rc->fun_data, rc->children);
+        if (rc->kind == MP_CODE_BYTECODE && rc->fun_data != NULL) {
+            const byte *bc = rc->fun_data;
+            size_t n_state, n_exc_stack, scope_flags, n_pos_args, n_kwonly_args, n_def_pos_args;
+            MP_BC_PRELUDE_SIG_DECODE_INTO(bc, n_state, n_exc_stack, scope_flags, n_pos_args, n_kwonly_args, n_def_pos_args);
+            size_t n_info, n_cell;
+            MP_BC_PRELUDE_SIZE_DECODE_INTO(bc, n_info, n_cell);
+            mp_uint_t name = mp_decode_uint_value(bc);
+            printf("[fun-trace] child[%u]-sig pos=%u kwonly=%u def=%u scope=0x%x raw-name=%u\n",
+                (unsigned)i, (unsigned)n_pos_args, (unsigned)n_kwonly_args,
+                (unsigned)n_def_pos_args, (unsigned)scope_flags, (unsigned)name);
+        }
+    }
+}
+
+static void fun_gc_trace_dump(const char *tag, mp_obj_t fun_in) {
+    mp_obj_fun_bc_t *fun = MP_OBJ_TO_PTR(fun_in);
+    printf("[fun-trace] %s fun=%p type=%p ctx=%p child=%p bytecode=%p\n",
+        tag, fun, fun->base.type, fun->context, fun->child_table, fun->bytecode);
+    fun_gc_trace_dump_child_table(fun->child_table);
+    if (fun->bytecode != NULL) {
+        const byte *bc = fun->bytecode;
+        size_t n_state, n_exc_stack, scope_flags, n_pos_args, n_kwonly_args, n_def_pos_args;
+        MP_BC_PRELUDE_SIG_DECODE_INTO(bc, n_state, n_exc_stack, scope_flags, n_pos_args, n_kwonly_args, n_def_pos_args);
+        size_t n_info, n_cell;
+        MP_BC_PRELUDE_SIZE_DECODE_INTO(bc, n_info, n_cell);
+        mp_uint_t name = mp_decode_uint_value(bc);
+        #if MICROPY_EMIT_BYTECODE_USES_QSTR_TABLE
+        if (fun->context != NULL) {
+            name = fun->context->constants.qstr_table[name];
+        }
+        #endif
+        printf("[fun-trace] %s sig pos=%u kwonly=%u def=%u scope=0x%x name=%u(%s)\n",
+            tag, (unsigned)n_pos_args, (unsigned)n_kwonly_args, (unsigned)n_def_pos_args,
+            (unsigned)scope_flags, (unsigned)name, qstr_str((qstr)name));
+    }
+}
+#else
+#define FUN_GC_TRACE(...) (void)0
+#define fun_gc_trace_dump(...) (void)0
+#endif
+
 // Note: the "name" entry in mp_obj_type_t for a function type must be
 // MP_QSTR_function because it is used to determine if an object is of generic
 // function type.
@@ -136,6 +202,11 @@ MP_DEFINE_CONST_OBJ_TYPE(
 qstr mp_obj_fun_get_name(mp_const_obj_t fun_in) {
     const mp_obj_fun_bc_t *fun = MP_OBJ_TO_PTR(fun_in);
     const byte *bc = fun->bytecode;
+
+    #if MICROPY_DEBUG_FUN_GC_TRACE
+    printf("[fun-trace] get_name fun=%p type=%p ctx=%p child=%p bytecode=%p\n",
+        fun, fun->base.type, fun->context, fun->child_table, fun->bytecode);
+    #endif
 
     #if MICROPY_ENABLE_NATIVE_CODE
     if (fun->base.type == &mp_type_fun_native || fun->base.type == &mp_type_native_gen_wrap) {
@@ -266,6 +337,8 @@ mp_code_state_t *mp_obj_fun_bc_prepare_codestate(mp_obj_t self_in, size_t n_args
 static mp_obj_t fun_bc_call(mp_obj_t self_in, size_t n_args, size_t n_kw, const mp_obj_t *args) {
     mp_cstack_check();
 
+    fun_gc_trace_dump("call-enter", self_in);
+
     DEBUG_printf("Input n_args: " UINT_FMT ", n_kw: " UINT_FMT "\n", n_args, n_kw);
     DEBUG_printf("Input pos args: ");
     dump_args(args, n_args);
@@ -300,6 +373,17 @@ static mp_obj_t fun_bc_call(mp_obj_t self_in, size_t n_args, size_t n_kw, const 
     #endif
 
     INIT_CODESTATE(code_state, self, n_state, n_args, n_kw, args);
+
+    #if !MICROPY_ENABLE_PYSTACK
+    if (state_size != 0) {
+        // Active VM frames keep C locals pointing into code_state; compaction
+        // must not move them while executing.
+        gc_pin(code_state);
+    }
+    #endif
+
+    FUN_GC_TRACE("[fun-trace] codestate self=%p code_state=%p n_state=%u state_size=%u globals=%p\n",
+        self, code_state, (unsigned)n_state, (unsigned)state_size, self->context ? self->context->module.globals : NULL);
 
     // execute the byte code with the correct globals context
     mp_globals_set(self->context->module.globals);

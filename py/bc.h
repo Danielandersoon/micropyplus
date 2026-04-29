@@ -28,6 +28,7 @@
 #define MICROPY_INCLUDED_PY_BC_H
 
 #include "py/runtime.h"
+#include "py/gc.h"
 
 // bytecode layout:
 //
@@ -246,8 +247,8 @@ typedef struct _mp_code_state_t {
     #if MICROPY_STACKLESS
     struct _mp_code_state_t *prev;
     #endif
-    #if MICROPY_PY_SYS_SETTRACE
     struct _mp_code_state_t *prev_state;
+    #if MICROPY_PY_SYS_SETTRACE
     struct _mp_obj_frame_t *frame;
     #endif
     // Variable-length
@@ -302,11 +303,17 @@ static inline void mp_module_context_alloc_tables(mp_module_context_t *context, 
     mp_uint_t *mem = m_new(mp_uint_t, nq + no);
     context->constants.qstr_table = (qstr_short_t *)mem;
     context->constants.obj_table = (mp_obj_t *)(mem + nq);
+    if (mem != NULL) {
+        gc_pin(mem);
+    }
     #else
     if (n_obj == 0) {
         context->constants.obj_table = NULL;
     } else {
         context->constants.obj_table = m_new(mp_obj_t, n_obj);
+        if (context->constants.obj_table != NULL) {
+            gc_pin(context->constants.obj_table);
+        }
     }
     #endif
 }
