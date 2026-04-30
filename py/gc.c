@@ -187,6 +187,8 @@ static void *gc_update_ptr(void *ptr, gc_forward_table_t *forward_table);
 static size_t gc_count_live_objects(mp_state_mem_area_t *area);
 static bool gc_forward_table_prealloc(gc_forward_table_t *table, size_t size);
 static void gc_dump_occupied_blocks(mp_state_mem_area_t *area, bool after_compaction);
+static void gc_mark_pinned_table_ranges(void);
+static void gc_update_pinned_table(gc_forward_table_t *forward_table);
 
 // Pinned objects tracking
 static pinned_table_t gc_pinned_table = {NULL, 0, 0};
@@ -213,6 +215,64 @@ static ssize_t gc_pinned_find_range_by_ptr(const void *ptr) {
         }
     }
     return -1;
+}
+
+static void gc_mark_pinned_table_ranges(void) {
+    if (gc_pinned_table.ranges == NULL || gc_pinned_table.capacity == 0) {
+        return;
+    }
+
+    mp_state_mem_area_t *area = NULL;
+    #if MICROPY_GC_SPLIT_HEAP
+    area = gc_get_ptr_area(gc_pinned_table.ranges);
+    if (area == NULL) {
+        return;
+    }
+    #else
+    if ((byte *)gc_pinned_table.ranges < (byte *)MP_STATE_MEM(area).gc_pool_start
+        || (byte *)gc_pinned_table.ranges >= (byte *)MP_STATE_MEM(area).gc_pool_end) {
+        return;
+    }
+    area = &MP_STATE_MEM(area);
+    #endif
+
+    size_t block = BLOCK_FROM_PTR(area, gc_pinned_table.ranges);
+    if (ATB_GET_KIND(area, block) == AT_HEAD) {
+        ATB_HEAD_TO_MARK(area, block);
+    }
+}
+
+static void gc_update_pinned_table(gc_forward_table_t *forward_table) {
+    if (gc_pinned_table.ranges == NULL) {
+        return;
+    }
+
+    gc_pinned_table.ranges = (pinned_range_t *)gc_update_ptr(gc_pinned_table.ranges, forward_table);
+
+    for (size_t i = 0; i < gc_pinned_table.count; ++i) {
+        pinned_range_t *range = &gc_pinned_table.ranges[i];
+        if (range->obj == NULL) {
+            continue;
+        }
+
+        range->obj = gc_update_ptr(range->obj, forward_table);
+
+        mp_state_mem_area_t *area = NULL;
+        #if MICROPY_GC_SPLIT_HEAP
+        area = gc_get_ptr_area(range->obj);
+        if (area == NULL) {
+            continue;
+        }
+        #else
+        if ((byte *)range->obj < (byte *)MP_STATE_MEM(area).gc_pool_start
+            || (byte *)range->obj >= (byte *)MP_STATE_MEM(area).gc_pool_end) {
+            continue;
+        }
+        area = &MP_STATE_MEM(area);
+        #endif
+
+        range->block_start = BLOCK_FROM_PTR(area, range->obj);
+    }
 }
 
 // TODO waste less memory; currently requires that all entries in alloc_table have a corresponding block in pool
@@ -309,12 +369,9 @@ void gc_init(void *start, void *end) {
     MP_STATE_MEM(gc_alloc_amount) = 0;
     #endif
 
-    // Initialize pinned table.  Use free() because gc_pin() now uses system
-    // realloc() for the ranges buffer (it must NOT live on the GC heap because
-    // compaction can move GC-heap allocations and gc_update_roots does not
-    // rewrite gc_pinned_table.ranges).
+    // Initialize pinned table.
     if (gc_pinned_table.ranges != NULL) {
-        free(gc_pinned_table.ranges);
+        gc_free(gc_pinned_table.ranges);
     }
     gc_pinned_table.capacity = 0;
     gc_pinned_table.count = 0;
@@ -951,6 +1008,11 @@ void gc_collect_end(void) {
         }
         #endif
     }
+
+    // Keep the pinned table storage alive if it's allocated on the GC heap.
+    // We intentionally don't trace its contents here because pinned entries
+    // should not act as GC roots.
+    gc_mark_pinned_table_ranges();
 
     // ALWAYS run finalisers then sweep BEFORE compaction.
     // gc_sweep_free_blocks() converts:
@@ -2399,9 +2461,8 @@ void gc_pin(void* ptr) {
         return;  // Already pinned
     }
 
-    // Check if we need to expand the table.
-    // Use system malloc/realloc (not GC heap) so that compaction never moves
-    // this buffer - gc_update_roots does not rewrite gc_pinned_table.ranges.
+    // Check if we need to expand the table on the MicroPython heap.
+    // gc_collect_end/gc_update_roots explicitly preserve and rewrite this buffer.
     bool needs_expansion = gc_pinned_table.count >= gc_pinned_table.capacity;
     if (needs_expansion) {
         size_t new_capacity = gc_pinned_table.capacity == 0 ?
@@ -2409,7 +2470,7 @@ void gc_pin(void* ptr) {
                                gc_pinned_table.capacity * 2;
         size_t new_size = new_capacity * sizeof(pinned_range_t);
 
-        pinned_range_t *new_ranges = (pinned_range_t *)realloc(gc_pinned_table.ranges, new_size);
+        pinned_range_t *new_ranges = (pinned_range_t *)gc_realloc(gc_pinned_table.ranges, new_size, true);
         if (new_ranges == NULL) {
             GC_EXIT();
             return;  // Allocation failed
@@ -3695,6 +3756,8 @@ static void gc_update_roots(mp_state_mem_area_t *area, gc_forward_table_t *forwa
 
         pool = (qstr_pool_t *)pool->prev;
     }
+
+    gc_update_pinned_table(forward_table);
 
     DEBUG_printf("[roots] summary root_slots=" UINT_FMT " root_rewritten=" UINT_FMT " scanned=" UINT_FMT " rewritten=" UINT_FMT " nonheap=" UINT_FMT " qstr_pools=" UINT_FMT " code_states=" UINT_FMT "\n",
         (mp_uint_t)root_slots,
