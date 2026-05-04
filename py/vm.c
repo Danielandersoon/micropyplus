@@ -708,12 +708,29 @@ dispatch_loop:
                 }
 
                 ENTRY(MP_BC_POINTER_MEMBER_ACCESS): {
+                    FRAME_UPDATE();
                     MARK_EXC_IP_SELECTIVE();
                     DECODE_QSTR;
                     mp_obj_t ptr_obj = TOP();
                     if (mp_obj_is_obj(ptr_obj) && ((mp_obj_base_t *)MP_OBJ_TO_PTR(ptr_obj))->type == &mp_type_pointer) {
                         mp_obj_pointer_t *p = MP_OBJ_TO_PTR(ptr_obj);
-                        SET_TOP(mp_load_attr(*(mp_obj_t *)MP_POINTER_GET_ADDR(p), qst));
+                        mp_obj_t top = *(mp_obj_t *)MP_POINTER_GET_ADDR(p);
+                        mp_obj_t obj;
+                        #if MICROPY_OPT_LOAD_ATTR_FAST_PATH
+                        // Mirror LOAD_ATTR's instance-members fast path for pointer member access.
+                        mp_map_elem_t *elem = NULL;
+                        if (mp_obj_is_instance_type(mp_obj_get_type(top))) {
+                            mp_obj_instance_t *self = MP_OBJ_TO_PTR(top);
+                            elem = mp_map_lookup(&self->members, MP_OBJ_NEW_QSTR(qst), MP_MAP_LOOKUP);
+                        }
+                        if (elem) {
+                            obj = elem->value;
+                        } else
+                        #endif
+                        {
+                            obj = mp_load_attr(top, qst);
+                        }
+                        SET_TOP(obj);
                     } else {
                         mp_raise_TypeError(MP_ERROR_TEXT("expected pointer object"));
                     }
