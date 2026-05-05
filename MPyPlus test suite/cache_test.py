@@ -63,13 +63,7 @@ res_ptr = pointer_cached(ptr, iterations)
 cached_time = time.ticks_diff(time.ticks_us(), start)
 print(f"Pointer (cached): {cached_time} us")
 
-start = time.ticks_us()
-pointer_deep_cache(deep_ptr, iterations)
-arrow_time = time.ticks_diff(time.ticks_us(), start)
-print(f"Pointer (deep arrow): {arrow_time} us")
-
 print(f"\nSpeedup (cached vs standard): {std_time/cached_time:.2f}x")
-print(f"Speedup (deep arrow vs standard): {std_time/arrow_time:.2f}x")
 
 expected = iterations * 42
 if res_std == expected and res_ptr == expected:
