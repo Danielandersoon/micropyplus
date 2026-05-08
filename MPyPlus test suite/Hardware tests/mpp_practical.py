@@ -96,10 +96,10 @@ def deep_standard(obj, iterations):
 
 
 def deep_cached(obj, iterations):
-	target = obj.next.next.next.next.next
+	target = &(obj.next.next.next.next.next)
 	total = 0
 	for _ in range(iterations):
-		total += target.value
+		total += target->value
 	return total
 
 
@@ -116,14 +116,14 @@ def imu_standard(imu, iterations):
 
 def imu_cached(imu, iterations):
 	# Match deep-cache semantics by caching final objects once, then reusing.
-	accel = imu.accel
-	gyro = imu.gyro
+	accel = &(imu.accel)
+	gyro = &(imu.gyro)
 	total = 0
 	for _ in range(iterations):
 		imu.get_accel_irq()
 		imu.get_gyro_irq()
-		total += accel.ix + accel.iy + accel.iz
-		total += gyro.ix + gyro.iy + gyro.iz
+		total += accel->ix + accel->iy + accel->iz
+		total += gyro->ix + gyro->iy + gyro->iz
 	return total
 
 
